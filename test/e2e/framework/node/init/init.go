@@ -18,6 +18,7 @@ limitations under the License.
 package init
 
 import (
+	"context"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -29,8 +30,14 @@ import (
 func init() {
 	framework.NewFrameworkExtensions = append(framework.NewFrameworkExtensions,
 		func(f *framework.Framework) {
-			ginkgo.AfterEach(func() {
-				e2enode.AllNodesReady(f.ClientSet, 3*time.Minute)
+			ginkgo.AfterEach(func(ctx context.Context) {
+				if f.ClientSet == nil {
+					// Test didn't reach f.BeforeEach, most
+					// likely because the test got
+					// skipped. Nothing to check...
+					return
+				}
+				e2enode.AllNodesReady(ctx, f.ClientSet, 3*time.Minute)
 			})
 		},
 	)

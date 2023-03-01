@@ -159,7 +159,7 @@ type KubeletConfiguration struct {
 	// enableDebuggingHandlers enables server endpoints for log collection
 	// and local running of containers and commands
 	EnableDebuggingHandlers bool
-	// enableContentionProfiling enables lock contention profiling, if enableDebuggingHandlers is true.
+	// enableContentionProfiling enables block profiling, if enableDebuggingHandlers is true.
 	EnableContentionProfiling bool
 	// healthzPort is the port of the localhost healthz endpoint (set to 0 to disable)
 	HealthzPort int32
@@ -241,6 +241,10 @@ type KubeletConfiguration struct {
 	// Default: "container"
 	// +optional
 	TopologyManagerScope string
+	// TopologyManagerPolicyOptions is a set of key=value which allows to set extra options
+	// to fine tune the behaviour of the topology manager policies.
+	// Requires  both the "TopologyManager" and "TopologyManagerPolicyOptions" feature gates to be enabled.
+	TopologyManagerPolicyOptions map[string]string
 	// Map of QoS resource reservation percentages (memory only for now).
 	// Requires the QOSReserved feature gate to be enabled.
 	QOSReserved map[string]string
@@ -289,6 +293,7 @@ type KubeletConfiguration struct {
 	// serializeImagePulls when enabled, tells the Kubelet to pull images one at a time.
 	SerializeImagePulls bool
 	// Map of signal names to quantities that defines hard eviction thresholds. For example: {"memory.available": "300Mi"}.
+	// Some default signals are Linux only: nodefs.inodesFree
 	EvictionHard map[string]string
 	// Map of signal names to quantities that defines soft eviction thresholds.  For example: {"memory.available": "300Mi"}.
 	EvictionSoft map[string]string
@@ -364,14 +369,14 @@ type KubeletConfiguration struct {
 	// See http://kubernetes.io/docs/user-guide/compute-resources for more detail.
 	KubeReserved map[string]string
 	// This flag helps kubelet identify absolute name of top level cgroup used to enforce `SystemReserved` compute resource reservation for OS system daemons.
-	// Refer to [Node Allocatable](https://git.k8s.io/community/contributors/design-proposals/node/node-allocatable.md) doc for more information.
+	// Refer to [Node Allocatable](https://kubernetes.io/docs/tasks/administer-cluster/reserve-compute-resources/#node-allocatable) doc for more information.
 	SystemReservedCgroup string
 	// This flag helps kubelet identify absolute name of top level cgroup used to enforce `KubeReserved` compute resource reservation for Kubernetes node system daemons.
-	// Refer to [Node Allocatable](https://git.k8s.io/community/contributors/design-proposals/node/node-allocatable.md) doc for more information.
+	// Refer to [Node Allocatable](https://kubernetes.io/docs/tasks/administer-cluster/reserve-compute-resources/#node-allocatable) doc for more information.
 	KubeReservedCgroup string
 	// This flag specifies the various Node Allocatable enforcements that Kubelet needs to perform.
 	// This flag accepts a list of options. Acceptable options are `pods`, `system-reserved` & `kube-reserved`.
-	// Refer to [Node Allocatable](https://github.com/kubernetes/design-proposals-archive/blob/main/node/node-allocatable.md) doc for more information.
+	// Refer to [Node Allocatable](https://kubernetes.io/docs/tasks/administer-cluster/reserve-compute-resources/#node-allocatable) doc for more information.
 	EnforceNodeAllocatable []string
 	// This option specifies the cpu list reserved for the host level system threads and kubernetes related threads.
 	// This provide a "static" CPU list rather than the "dynamic" list by system-reserved and kube-reserved.
@@ -445,6 +450,7 @@ type KubeletConfiguration struct {
 	// registerNode enables automatic registration with the apiserver.
 	// +optional
 	RegisterNode bool
+
 	// Tracing specifies the versioned configuration for OpenTelemetry tracing clients.
 	// See https://kep.k8s.io/2832 for more details.
 	// +featureGate=KubeletTracing
@@ -460,6 +466,16 @@ type KubeletConfiguration struct {
 	// disabled. Once disabled, user should not set request/limit for container's ephemeral storage, or sizeLimit for emptyDir.
 	// +optional
 	LocalStorageCapacityIsolation bool
+
+	// ContainerRuntimeEndpoint is the endpoint of container runtime.
+	// unix domain sockets supported on Linux while npipes and tcp endpoints are supported for windows.
+	// Examples:'unix:///path/to/runtime.sock', 'npipe:////./pipe/runtime'
+	ContainerRuntimeEndpoint string
+
+	// ImageServiceEndpoint is the endpoint of container image service.
+	// If not specified the default value is ContainerRuntimeEndpoint
+	// +optional
+	ImageServiceEndpoint string
 }
 
 // KubeletAuthorizationMode denotes the authorization mode for the kubelet
@@ -595,6 +611,7 @@ type CredentialProvider struct {
 	// MUST use the same encoding version as the input. Current supported values are:
 	// - credentialprovider.kubelet.k8s.io/v1alpha1
 	// - credentialprovider.kubelet.k8s.io/v1beta1
+	// - credentialprovider.kubelet.k8s.io/v1
 	APIVersion string
 
 	// Arguments to pass to the command when executing it.

@@ -72,7 +72,7 @@ var NodePrePullImageList = sets.NewString(
 // 1. the hard coded lists
 // 2. the ones passed in from framework.TestContext.ExtraEnvs
 // So this function needs to be called after the extra envs are applied.
-func updateImageAllowList() {
+func updateImageAllowList(ctx context.Context) {
 	// Union NodePrePullImageList and PrePulledImages into the framework image pre-pull list.
 	e2epod.ImagePrePullList = NodePrePullImageList.Union(commontest.PrePulledImages)
 	// Images from extra envs
@@ -82,7 +82,7 @@ func updateImageAllowList() {
 	} else {
 		e2epod.ImagePrePullList.Insert(sriovDevicePluginImage)
 	}
-	if gpuDevicePluginImage, err := getGPUDevicePluginImage(); err != nil {
+	if gpuDevicePluginImage, err := getGPUDevicePluginImage(ctx); err != nil {
 		klog.Errorln(err)
 	} else {
 		e2epod.ImagePrePullList.Insert(gpuDevicePluginImage)
@@ -125,11 +125,11 @@ func (rp *remotePuller) Name() string {
 }
 
 func (rp *remotePuller) Pull(image string) ([]byte, error) {
-	resp, err := rp.imageService.ImageStatus(&runtimeapi.ImageSpec{Image: image}, false)
+	resp, err := rp.imageService.ImageStatus(context.Background(), &runtimeapi.ImageSpec{Image: image}, false)
 	if err == nil && resp.GetImage() != nil {
 		return nil, nil
 	}
-	_, err = rp.imageService.PullImage(&runtimeapi.ImageSpec{Image: image}, nil, nil)
+	_, err = rp.imageService.PullImage(context.Background(), &runtimeapi.ImageSpec{Image: image}, nil, nil)
 	return nil, err
 }
 
@@ -213,8 +213,8 @@ func PrePullAllImages() error {
 }
 
 // getGPUDevicePluginImage returns the image of GPU device plugin.
-func getGPUDevicePluginImage() (string, error) {
-	ds, err := e2emanifest.DaemonSetFromURL(e2egpu.GPUDevicePluginDSYAML)
+func getGPUDevicePluginImage(ctx context.Context) (string, error) {
+	ds, err := e2emanifest.DaemonSetFromURL(ctx, e2egpu.GPUDevicePluginDSYAML)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse the device plugin image: %w", err)
 	}
@@ -230,12 +230,12 @@ func getGPUDevicePluginImage() (string, error) {
 func getSampleDevicePluginImage() (string, error) {
 	data, err := e2etestfiles.Read(SampleDevicePluginDSYAML)
 	if err != nil {
-		return "", fmt.Errorf("failed to read the sample plugin yaml: %v", err)
+		return "", fmt.Errorf("failed to read the sample plugin yaml: %w", err)
 	}
 
 	ds, err := e2emanifest.DaemonSetFromData(data)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse daemon set for sample plugin: %v", err)
+		return "", fmt.Errorf("failed to parse daemon set for sample plugin: %w", err)
 	}
 
 	if len(ds.Spec.Template.Spec.Containers) < 1 {

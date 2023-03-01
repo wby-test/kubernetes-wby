@@ -93,7 +93,7 @@ const (
 	// alpha: v1.26
 	//
 	// Enables expression validation in Admission Control
-	CELValidatingAdmission featuregate.Feature = "CELValidatingAdmission"
+	ValidatingAdmissionPolicy featuregate.Feature = "ValidatingAdmissionPolicy"
 
 	// owner: @cici37
 	// kep: https://kep.k8s.io/2876
@@ -216,13 +216,13 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 
 	APIResponseCompression: {Default: true, PreRelease: featuregate.Beta},
 
-	APIServerIdentity: {Default: false, PreRelease: featuregate.Alpha},
+	APIServerIdentity: {Default: true, PreRelease: featuregate.Beta},
 
 	APIServerTracing: {Default: false, PreRelease: featuregate.Alpha},
 
-	AdvancedAuditing: {Default: true, PreRelease: featuregate.GA},
+	AdvancedAuditing: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.28
 
-	CELValidatingAdmission: {Default: false, PreRelease: featuregate.Alpha},
+	ValidatingAdmissionPolicy: {Default: false, PreRelease: featuregate.Alpha},
 
 	CustomResourceValidationExpressions: {Default: true, PreRelease: featuregate.Beta},
 
@@ -242,7 +242,7 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 
 	ServerSideApply: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.29
 
-	ServerSideFieldValidation: {Default: true, PreRelease: featuregate.Beta},
+	ServerSideFieldValidation: {Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.29
 
 	StorageVersionAPI: {Default: false, PreRelease: featuregate.Alpha},
 

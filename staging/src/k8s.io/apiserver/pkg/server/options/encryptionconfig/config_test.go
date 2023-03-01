@@ -26,15 +26,16 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apiserverconfig "k8s.io/apiserver/pkg/apis/config"
 	"k8s.io/apiserver/pkg/features"
 	"k8s.io/apiserver/pkg/storage/value"
 	"k8s.io/apiserver/pkg/storage/value/encrypt/envelope"
-	envelopekmsv2 "k8s.io/apiserver/pkg/storage/value/encrypt/envelope/kmsv2"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	kmsservice "k8s.io/kms/service"
 )
 
 const (
@@ -68,28 +69,28 @@ type testKMSv2EnvelopeService struct {
 	err error
 }
 
-func (t *testKMSv2EnvelopeService) Decrypt(ctx context.Context, uid string, req *envelopekmsv2.DecryptRequest) ([]byte, error) {
+func (t *testKMSv2EnvelopeService) Decrypt(ctx context.Context, uid string, req *kmsservice.DecryptRequest) ([]byte, error) {
 	if t.err != nil {
 		return nil, t.err
 	}
 	return base64.StdEncoding.DecodeString(string(req.Ciphertext))
 }
 
-func (t *testKMSv2EnvelopeService) Encrypt(ctx context.Context, uid string, data []byte) (*envelopekmsv2.EncryptResponse, error) {
+func (t *testKMSv2EnvelopeService) Encrypt(ctx context.Context, uid string, data []byte) (*kmsservice.EncryptResponse, error) {
 	if t.err != nil {
 		return nil, t.err
 	}
-	return &envelopekmsv2.EncryptResponse{
+	return &kmsservice.EncryptResponse{
 		Ciphertext: []byte(base64.StdEncoding.EncodeToString(data)),
 		KeyID:      "1",
 	}, nil
 }
 
-func (t *testKMSv2EnvelopeService) Status(ctx context.Context) (*envelopekmsv2.StatusResponse, error) {
+func (t *testKMSv2EnvelopeService) Status(ctx context.Context) (*kmsservice.StatusResponse, error) {
 	if t.err != nil {
 		return nil, t.err
 	}
-	return &envelopekmsv2.StatusResponse{Healthz: "ok", KeyID: "1", Version: "v2alpha1"}, nil
+	return &kmsservice.StatusResponse{Healthz: "ok", KeyID: "1", Version: "v2alpha1"}, nil
 }
 
 // The factory method to create mock envelope service.
@@ -103,18 +104,18 @@ func newMockErrorEnvelopeService(endpoint string, timeout time.Duration) (envelo
 }
 
 // The factory method to create mock envelope kmsv2 service.
-func newMockEnvelopeKMSv2Service(ctx context.Context, endpoint string, timeout time.Duration) (envelopekmsv2.Service, error) {
+func newMockEnvelopeKMSv2Service(ctx context.Context, endpoint, providerName string, timeout time.Duration) (kmsservice.Service, error) {
 	return &testKMSv2EnvelopeService{nil}, nil
 }
 
 // The factory method to create mock envelope kmsv2 service which always returns error.
-func newMockErrorEnvelopeKMSv2Service(endpoint string, timeout time.Duration) (envelopekmsv2.Service, error) {
+func newMockErrorEnvelopeKMSv2Service(endpoint string, timeout time.Duration) (kmsservice.Service, error) {
 	return &testKMSv2EnvelopeService{errors.New("test")}, nil
 }
 
 func TestLegacyConfig(t *testing.T) {
 	legacyV1Config := "testdata/valid-configs/legacy.yaml"
-	legacyConfigObject, err := loadConfig(legacyV1Config)
+	legacyConfigObject, _, err := loadConfig(legacyV1Config, false)
 	cacheSize := int32(10)
 	if err != nil {
 		t.Fatalf("error while parsing configuration file: %s.\nThe file was:\n%s", err, legacyV1Config)
@@ -163,12 +164,12 @@ func TestEncryptionProviderConfigCorrect(t *testing.T) {
 	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.KMSv2, true)()
 	// Set factory for mock envelope service
 	factory := envelopeServiceFactory
-	factoryKMSv2 := envelopeKMSv2ServiceFactory
+	factoryKMSv2 := EnvelopeKMSv2ServiceFactory
 	envelopeServiceFactory = newMockEnvelopeService
-	envelopeKMSv2ServiceFactory = newMockEnvelopeKMSv2Service
+	EnvelopeKMSv2ServiceFactory = newMockEnvelopeKMSv2Service
 	defer func() {
 		envelopeServiceFactory = factory
-		envelopeKMSv2ServiceFactory = factoryKMSv2
+		EnvelopeKMSv2ServiceFactory = factoryKMSv2
 	}()
 
 	ctx := testContext(t)
@@ -176,49 +177,79 @@ func TestEncryptionProviderConfigCorrect(t *testing.T) {
 	// Creates compound/prefix transformers with different ordering of available transformers.
 	// Transforms data using one of them, and tries to untransform using the others.
 	// Repeats this for all possible combinations.
+	// Math for GracePeriod is explained at - https://github.com/kubernetes/kubernetes/blob/c9ed04762f94a319d7b1fb718dc345491a32bea6/staging/src/k8s.io/apiserver/pkg/server/options/encryptionconfig/config.go#L159-L163
+	expectedKMSCloseGracePeriod := 46 * time.Second
 	correctConfigWithIdentityFirst := "testdata/valid-configs/identity-first.yaml"
-	identityFirstTransformerOverrides, _, err := LoadEncryptionConfig(correctConfigWithIdentityFirst, ctx.Done())
+	identityFirstEncryptionConfiguration, err := LoadEncryptionConfig(ctx, correctConfigWithIdentityFirst, false)
 	if err != nil {
 		t.Fatalf("error while parsing configuration file: %s.\nThe file was:\n%s", err, correctConfigWithIdentityFirst)
 	}
+	if identityFirstEncryptionConfiguration.KMSCloseGracePeriod != expectedKMSCloseGracePeriod {
+		t.Fatalf("KMSCloseGracePeriod mismatch (-want +got):\n%s", cmp.Diff(expectedKMSCloseGracePeriod, identityFirstEncryptionConfiguration.KMSCloseGracePeriod))
+	}
 
+	// Math for GracePeriod is explained at - https://github.com/kubernetes/kubernetes/blob/c9ed04762f94a319d7b1fb718dc345491a32bea6/staging/src/k8s.io/apiserver/pkg/server/options/encryptionconfig/config.go#L159-L163
+	expectedKMSCloseGracePeriod = 32 * time.Second
 	correctConfigWithAesGcmFirst := "testdata/valid-configs/aes-gcm-first.yaml"
-	aesGcmFirstTransformerOverrides, _, err := LoadEncryptionConfig(correctConfigWithAesGcmFirst, ctx.Done())
+	aesGcmFirstEncryptionConfiguration, err := LoadEncryptionConfig(ctx, correctConfigWithAesGcmFirst, false)
 	if err != nil {
 		t.Fatalf("error while parsing configuration file: %s.\nThe file was:\n%s", err, correctConfigWithAesGcmFirst)
 	}
+	if aesGcmFirstEncryptionConfiguration.KMSCloseGracePeriod != expectedKMSCloseGracePeriod {
+		t.Fatalf("KMSCloseGracePeriod mismatch (-want +got):\n%s", cmp.Diff(expectedKMSCloseGracePeriod, aesGcmFirstEncryptionConfiguration.KMSCloseGracePeriod))
+	}
 
+	// Math for GracePeriod is explained at - https://github.com/kubernetes/kubernetes/blob/c9ed04762f94a319d7b1fb718dc345491a32bea6/staging/src/k8s.io/apiserver/pkg/server/options/encryptionconfig/config.go#L159-L163
+	expectedKMSCloseGracePeriod = 26 * time.Second
 	correctConfigWithAesCbcFirst := "testdata/valid-configs/aes-cbc-first.yaml"
-	aesCbcFirstTransformerOverrides, _, err := LoadEncryptionConfig(correctConfigWithAesCbcFirst, ctx.Done())
+	aesCbcFirstEncryptionConfiguration, err := LoadEncryptionConfig(ctx, correctConfigWithAesCbcFirst, false)
 	if err != nil {
 		t.Fatalf("error while parsing configuration file: %s.\nThe file was:\n%s", err, correctConfigWithAesCbcFirst)
 	}
+	if aesCbcFirstEncryptionConfiguration.KMSCloseGracePeriod != expectedKMSCloseGracePeriod {
+		t.Fatalf("KMSCloseGracePeriod mismatch (-want +got):\n%s", cmp.Diff(expectedKMSCloseGracePeriod, aesCbcFirstEncryptionConfiguration.KMSCloseGracePeriod))
+	}
 
+	// Math for GracePeriod is explained at - https://github.com/kubernetes/kubernetes/blob/c9ed04762f94a319d7b1fb718dc345491a32bea6/staging/src/k8s.io/apiserver/pkg/server/options/encryptionconfig/config.go#L159-L163
+	expectedKMSCloseGracePeriod = 14 * time.Second
 	correctConfigWithSecretboxFirst := "testdata/valid-configs/secret-box-first.yaml"
-	secretboxFirstTransformerOverrides, _, err := LoadEncryptionConfig(correctConfigWithSecretboxFirst, ctx.Done())
+	secretboxFirstEncryptionConfiguration, err := LoadEncryptionConfig(ctx, correctConfigWithSecretboxFirst, false)
 	if err != nil {
 		t.Fatalf("error while parsing configuration file: %s.\nThe file was:\n%s", err, correctConfigWithSecretboxFirst)
 	}
+	if secretboxFirstEncryptionConfiguration.KMSCloseGracePeriod != expectedKMSCloseGracePeriod {
+		t.Fatalf("KMSCloseGracePeriod mismatch (-want +got):\n%s", cmp.Diff(expectedKMSCloseGracePeriod, secretboxFirstEncryptionConfiguration.KMSCloseGracePeriod))
+	}
 
+	// Math for GracePeriod is explained at - https://github.com/kubernetes/kubernetes/blob/c9ed04762f94a319d7b1fb718dc345491a32bea6/staging/src/k8s.io/apiserver/pkg/server/options/encryptionconfig/config.go#L159-L163
+	expectedKMSCloseGracePeriod = 34 * time.Second
 	correctConfigWithKMSFirst := "testdata/valid-configs/kms-first.yaml"
-	kmsFirstTransformerOverrides, _, err := LoadEncryptionConfig(correctConfigWithKMSFirst, ctx.Done())
+	kmsFirstEncryptionConfiguration, err := LoadEncryptionConfig(ctx, correctConfigWithKMSFirst, false)
 	if err != nil {
 		t.Fatalf("error while parsing configuration file: %s.\nThe file was:\n%s", err, correctConfigWithKMSFirst)
 	}
+	if kmsFirstEncryptionConfiguration.KMSCloseGracePeriod != expectedKMSCloseGracePeriod {
+		t.Fatalf("KMSCloseGracePeriod mismatch (-want +got):\n%s", cmp.Diff(expectedKMSCloseGracePeriod, kmsFirstEncryptionConfiguration.KMSCloseGracePeriod))
+	}
 
+	// Math for GracePeriod is explained at - https://github.com/kubernetes/kubernetes/blob/c9ed04762f94a319d7b1fb718dc345491a32bea6/staging/src/k8s.io/apiserver/pkg/server/options/encryptionconfig/config.go#L159-L163
+	expectedKMSCloseGracePeriod = 42 * time.Second
 	correctConfigWithKMSv2First := "testdata/valid-configs/kmsv2-first.yaml"
-	kmsv2FirstTransformerOverrides, _, err := LoadEncryptionConfig(correctConfigWithKMSv2First, ctx.Done())
+	kmsv2FirstEncryptionConfiguration, err := LoadEncryptionConfig(ctx, correctConfigWithKMSv2First, false)
 	if err != nil {
 		t.Fatalf("error while parsing configuration file: %s.\nThe file was:\n%s", err, correctConfigWithKMSv2First)
 	}
+	if kmsv2FirstEncryptionConfiguration.KMSCloseGracePeriod != expectedKMSCloseGracePeriod {
+		t.Fatalf("KMSCloseGracePeriod mismatch (-want +got):\n%s", cmp.Diff(expectedKMSCloseGracePeriod, kmsv2FirstEncryptionConfiguration.KMSCloseGracePeriod))
+	}
 
 	// Pick the transformer for any of the returned resources.
-	identityFirstTransformer := identityFirstTransformerOverrides[schema.ParseGroupResource("secrets")]
-	aesGcmFirstTransformer := aesGcmFirstTransformerOverrides[schema.ParseGroupResource("secrets")]
-	aesCbcFirstTransformer := aesCbcFirstTransformerOverrides[schema.ParseGroupResource("secrets")]
-	secretboxFirstTransformer := secretboxFirstTransformerOverrides[schema.ParseGroupResource("secrets")]
-	kmsFirstTransformer := kmsFirstTransformerOverrides[schema.ParseGroupResource("secrets")]
-	kmsv2FirstTransformer := kmsv2FirstTransformerOverrides[schema.ParseGroupResource("secrets")]
+	identityFirstTransformer := identityFirstEncryptionConfiguration.Transformers[schema.ParseGroupResource("secrets")]
+	aesGcmFirstTransformer := aesGcmFirstEncryptionConfiguration.Transformers[schema.ParseGroupResource("secrets")]
+	aesCbcFirstTransformer := aesCbcFirstEncryptionConfiguration.Transformers[schema.ParseGroupResource("secrets")]
+	secretboxFirstTransformer := secretboxFirstEncryptionConfiguration.Transformers[schema.ParseGroupResource("secrets")]
+	kmsFirstTransformer := kmsFirstEncryptionConfiguration.Transformers[schema.ParseGroupResource("secrets")]
+	kmsv2FirstTransformer := kmsv2FirstEncryptionConfiguration.Transformers[schema.ParseGroupResource("secrets")]
 
 	dataCtx := value.DefaultContext([]byte(sampleContextText))
 	originalText := []byte(sampleText)
@@ -256,14 +287,242 @@ func TestEncryptionProviderConfigCorrect(t *testing.T) {
 	}
 }
 
+func TestKMSMaxTimeout(t *testing.T) {
+	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.KMSv2, true)()
+
+	testCases := []struct {
+		name            string
+		expectedTimeout time.Duration
+		config          apiserverconfig.EncryptionConfiguration
+	}{
+		{
+			name: "default timeout",
+			config: apiserverconfig.EncryptionConfiguration{
+				Resources: []apiserverconfig.ResourceConfiguration{
+					{
+						Resources: []string{"secrets"},
+						Providers: []apiserverconfig.ProviderConfiguration{
+							{
+								KMS: &apiserverconfig.KMSConfiguration{
+									Name:       "kms",
+									APIVersion: "v1",
+									Timeout: &metav1.Duration{
+										// default timeout is 3s
+										// this will be set automatically if not provided in config file
+										Duration: 3 * time.Second,
+									},
+									Endpoint: "unix:///tmp/testprovider.sock",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedTimeout: 6 * time.Second,
+		},
+		{
+			name: "with v1 provider",
+			config: apiserverconfig.EncryptionConfiguration{
+				Resources: []apiserverconfig.ResourceConfiguration{
+					{
+						Resources: []string{"secrets"},
+						Providers: []apiserverconfig.ProviderConfiguration{
+							{
+								KMS: &apiserverconfig.KMSConfiguration{
+									Name:       "kms",
+									APIVersion: "v1",
+									Timeout: &metav1.Duration{
+										// default timeout is 3s
+										// this will be set automatically if not provided in config file
+										Duration: 3 * time.Second,
+									},
+									Endpoint: "unix:///tmp/testprovider.sock",
+								},
+							},
+						},
+					},
+					{
+						Resources: []string{"configmaps"},
+						Providers: []apiserverconfig.ProviderConfiguration{
+							{
+								KMS: &apiserverconfig.KMSConfiguration{
+									Name:       "kms",
+									APIVersion: "v1",
+									Timeout: &metav1.Duration{
+										// default timeout is 3s
+										// this will be set automatically if not provided in config file
+										Duration: 3 * time.Second,
+									},
+									Endpoint: "unix:///tmp/testprovider.sock",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedTimeout: 12 * time.Second,
+		},
+		{
+			name: "with v2 provider",
+			config: apiserverconfig.EncryptionConfiguration{
+				Resources: []apiserverconfig.ResourceConfiguration{
+					{
+						Resources: []string{"secrets"},
+						Providers: []apiserverconfig.ProviderConfiguration{
+							{
+								KMS: &apiserverconfig.KMSConfiguration{
+									Name:       "kms",
+									APIVersion: "v2",
+									Timeout: &metav1.Duration{
+										Duration: 15 * time.Second,
+									},
+									Endpoint: "unix:///tmp/testprovider.sock",
+								},
+							},
+							{
+								KMS: &apiserverconfig.KMSConfiguration{
+									Name:       "new-kms",
+									APIVersion: "v2",
+									Timeout: &metav1.Duration{
+										Duration: 5 * time.Second,
+									},
+									Endpoint: "unix:///tmp/anothertestprovider.sock",
+								},
+							},
+						},
+					},
+					{
+						Resources: []string{"configmaps"},
+						Providers: []apiserverconfig.ProviderConfiguration{
+							{
+								KMS: &apiserverconfig.KMSConfiguration{
+									Name:       "another-kms",
+									APIVersion: "v2",
+									Timeout: &metav1.Duration{
+										Duration: 10 * time.Second,
+									},
+									Endpoint: "unix:///tmp/testprovider.sock",
+								},
+							},
+							{
+								KMS: &apiserverconfig.KMSConfiguration{
+									Name:       "yet-another-kms",
+									APIVersion: "v2",
+									Timeout: &metav1.Duration{
+										Duration: 2 * time.Second,
+									},
+									Endpoint: "unix:///tmp/anothertestprovider.sock",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedTimeout: 32 * time.Second,
+		},
+		{
+			name: "with v1 and v2 provider",
+			config: apiserverconfig.EncryptionConfiguration{
+				Resources: []apiserverconfig.ResourceConfiguration{
+					{
+						Resources: []string{"secrets"},
+						Providers: []apiserverconfig.ProviderConfiguration{
+							{
+								KMS: &apiserverconfig.KMSConfiguration{
+									Name:       "kms",
+									APIVersion: "v1",
+									Timeout: &metav1.Duration{
+										Duration: 1 * time.Second,
+									},
+									Endpoint: "unix:///tmp/testprovider.sock",
+								},
+							},
+							{
+								KMS: &apiserverconfig.KMSConfiguration{
+									Name:       "another-kms",
+									APIVersion: "v2",
+									Timeout: &metav1.Duration{
+										Duration: 1 * time.Second,
+									},
+									Endpoint: "unix:///tmp/anothertestprovider.sock",
+								},
+							},
+						},
+					},
+					{
+						Resources: []string{"configmaps"},
+						Providers: []apiserverconfig.ProviderConfiguration{
+							{
+								KMS: &apiserverconfig.KMSConfiguration{
+									Name:       "kms",
+									APIVersion: "v1",
+									Timeout: &metav1.Duration{
+										Duration: 4 * time.Second,
+									},
+									Endpoint: "unix:///tmp/testprovider.sock",
+								},
+							},
+							{
+								KMS: &apiserverconfig.KMSConfiguration{
+									Name:       "yet-another-kms",
+									APIVersion: "v1",
+									Timeout: &metav1.Duration{
+										Duration: 2 * time.Second,
+									},
+									Endpoint: "unix:///tmp/anothertestprovider.sock",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedTimeout: 15 * time.Second,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			cacheSize := int32(1000)
+			for _, resource := range testCase.config.Resources {
+				for _, provider := range resource.Providers {
+					if provider.KMS != nil {
+						provider.KMS.CacheSize = &cacheSize
+					}
+				}
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel() // cancel this upfront so the kms v2 checks do not block
+
+			_, _, kmsUsed, _ := getTransformerOverridesAndKMSPluginHealthzCheckers(ctx, &testCase.config)
+			if kmsUsed == nil {
+				t.Fatal("kmsUsed should not be nil")
+			}
+
+			if kmsUsed.kmsTimeoutSum != testCase.expectedTimeout {
+				t.Fatalf("expected timeout %v, got %v", testCase.expectedTimeout, kmsUsed.kmsTimeoutSum)
+			}
+		})
+	}
+}
+
 func TestKMSPluginHealthz(t *testing.T) {
 	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.KMSv2, true)()
+
+	kmsv2Probe := &kmsv2PluginProbe{
+		name: "foo",
+		ttl:  3 * time.Second,
+	}
+	keyID := "1"
+	kmsv2Probe.keyID.Store(&keyID)
 
 	testCases := []struct {
 		desc    string
 		config  string
 		want    []healthChecker
 		wantErr string
+		kmsv2   bool
+		kmsv1   bool
 	}{
 		{
 			desc:   "Install Healthz",
@@ -274,6 +533,7 @@ func TestKMSPluginHealthz(t *testing.T) {
 					ttl:  3 * time.Second,
 				},
 			},
+			kmsv1: true,
 		},
 		{
 			desc:   "Install multiple healthz",
@@ -288,6 +548,7 @@ func TestKMSPluginHealthz(t *testing.T) {
 					ttl:  3 * time.Second,
 				},
 			},
+			kmsv1: true,
 		},
 		{
 			desc:   "No KMS Providers",
@@ -297,15 +558,14 @@ func TestKMSPluginHealthz(t *testing.T) {
 			desc:   "Install multiple healthz with v1 and v2",
 			config: "testdata/valid-configs/kms/multiple-providers-kmsv2.yaml",
 			want: []healthChecker{
-				&kmsv2PluginProbe{
-					name: "foo",
-					ttl:  3 * time.Second,
-				},
+				kmsv2Probe,
 				&kmsPluginProbe{
 					name: "bar",
 					ttl:  3 * time.Second,
 				},
 			},
+			kmsv2: true,
+			kmsv1: true,
 		},
 		{
 			desc:    "Invalid API version",
@@ -317,7 +577,7 @@ func TestKMSPluginHealthz(t *testing.T) {
 
 	for _, tt := range testCases {
 		t.Run(tt.desc, func(t *testing.T) {
-			config, err := loadConfig(tt.config)
+			config, _, err := loadConfig(tt.config, false)
 			if errStr := errString(err); errStr != tt.wantErr {
 				t.Fatalf("unexpected error state got=%s want=%s", errStr, tt.wantErr)
 			}
@@ -325,7 +585,9 @@ func TestKMSPluginHealthz(t *testing.T) {
 				return
 			}
 
-			_, got, err := getTransformerOverridesAndKMSPluginProbes(config, testContext(t).Done())
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel() // cancel this upfront so the kms v2 healthz check poll does not run
+			_, got, kmsUsed, err := getTransformerOverridesAndKMSPluginProbes(ctx, config)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -342,9 +604,17 @@ func TestKMSPluginHealthz(t *testing.T) {
 					p.service = nil
 					p.l = nil
 					p.lastResponse = nil
+					p.keyID = kmsv2Probe.keyID
 				default:
 					t.Fatalf("unexpected probe type %T", p)
 				}
+			}
+
+			if tt.kmsv2 != kmsUsed.v2Used {
+				t.Errorf("incorrect kms v2 detection: want=%v got=%v", tt.kmsv2, kmsUsed.v2Used)
+			}
+			if tt.kmsv1 != kmsUsed.v1Used {
+				t.Errorf("incorrect kms v1 detection: want=%v got=%v", tt.kmsv1, kmsUsed.v1Used)
 			}
 
 			if d := cmp.Diff(tt.want, got,
@@ -409,7 +679,7 @@ func TestKMSPluginHealthzTTL(t *testing.T) {
 func TestKMSv2PluginHealthzTTL(t *testing.T) {
 	ctx := testContext(t)
 
-	service, _ := newMockEnvelopeKMSv2Service(ctx, "unix:///tmp/testprovider.sock", 3*time.Second)
+	service, _ := newMockEnvelopeKMSv2Service(ctx, "unix:///tmp/testprovider.sock", "providerName", 3*time.Second)
 	errService, _ := newMockErrorEnvelopeKMSv2Service("unix:///tmp/testprovider.sock", 3*time.Second)
 
 	testCases := []struct {
@@ -528,14 +798,14 @@ func getTransformerFromEncryptionConfig(t *testing.T, encryptionConfigPath strin
 	ctx := testContext(t)
 
 	t.Helper()
-	transformers, _, err := LoadEncryptionConfig(encryptionConfigPath, ctx.Done())
+	encryptionConfiguration, err := LoadEncryptionConfig(ctx, encryptionConfigPath, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(transformers) != 1 {
+	if len(encryptionConfiguration.Transformers) != 1 {
 		t.Fatalf("input config does not have exactly one resource: %s", encryptionConfigPath)
 	}
-	for _, transformer := range transformers {
+	for _, transformer := range encryptionConfiguration.Transformers {
 		return transformer
 	}
 	panic("unreachable")
@@ -544,23 +814,23 @@ func getTransformerFromEncryptionConfig(t *testing.T, encryptionConfigPath strin
 func TestIsKMSv2ProviderHealthyError(t *testing.T) {
 	testCases := []struct {
 		desc           string
-		statusResponse *envelopekmsv2.StatusResponse
+		statusResponse *kmsservice.StatusResponse
 	}{
 		{
 			desc: "healthz status is not ok",
-			statusResponse: &envelopekmsv2.StatusResponse{
+			statusResponse: &kmsservice.StatusResponse{
 				Healthz: "unhealthy",
 			},
 		},
 		{
 			desc: "version is not v2alpha1",
-			statusResponse: &envelopekmsv2.StatusResponse{
+			statusResponse: &kmsservice.StatusResponse{
 				Version: "v1beta1",
 			},
 		},
 		{
 			desc: "missing keyID",
-			statusResponse: &envelopekmsv2.StatusResponse{
+			statusResponse: &kmsservice.StatusResponse{
 				Healthz: "ok",
 				Version: "v2alpha1",
 			},
@@ -588,4 +858,13 @@ func errString(err error) string {
 	}
 
 	return err.Error()
+}
+
+func TestComputeEncryptionConfigHash(t *testing.T) {
+	// hash the empty string to be sure that sha256 is being used
+	expect := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	sum := computeEncryptionConfigHash([]byte(""))
+	if expect != sum {
+		t.Errorf("expected hash %q but got %q", expect, sum)
+	}
 }

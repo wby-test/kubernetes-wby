@@ -64,6 +64,8 @@ const (
 	Node                  GVK = "Node"
 	PersistentVolume      GVK = "PersistentVolume"
 	PersistentVolumeClaim GVK = "PersistentVolumeClaim"
+	PodScheduling         GVK = "PodScheduling"
+	ResourceClaim         GVK = "ResourceClaim"
 	StorageClass          GVK = "storage.k8s.io/StorageClass"
 	CSINode               GVK = "storage.k8s.io/CSINode"
 	CSIDriver             GVK = "storage.k8s.io/CSIDriver"
@@ -102,6 +104,8 @@ type QueuedPodInfo struct {
 	InitialAttemptTimestamp time.Time
 	// If a Pod failed in a scheduling cycle, record the plugin names it failed by.
 	UnschedulablePlugins sets.String
+	// Whether the Pod is scheduling gated (by PreEnqueuePlugins) or not.
+	Gated bool
 }
 
 // DeepCopy returns a deep copy of the QueuedPodInfo object.
@@ -111,6 +115,8 @@ func (pqi *QueuedPodInfo) DeepCopy() *QueuedPodInfo {
 		Timestamp:               pqi.Timestamp,
 		Attempts:                pqi.Attempts,
 		InitialAttemptTimestamp: pqi.InitialAttemptTimestamp,
+		UnschedulablePlugins:    pqi.UnschedulablePlugins.Clone(),
+		Gated:                   pqi.Gated,
 	}
 }
 
@@ -123,7 +129,6 @@ type PodInfo struct {
 	RequiredAntiAffinityTerms  []AffinityTerm
 	PreferredAffinityTerms     []WeightedAffinityTerm
 	PreferredAntiAffinityTerms []WeightedAffinityTerm
-	ParseError                 error
 }
 
 // DeepCopy returns a deep copy of the PodInfo object.
@@ -134,18 +139,17 @@ func (pi *PodInfo) DeepCopy() *PodInfo {
 		RequiredAntiAffinityTerms:  pi.RequiredAntiAffinityTerms,
 		PreferredAffinityTerms:     pi.PreferredAffinityTerms,
 		PreferredAntiAffinityTerms: pi.PreferredAntiAffinityTerms,
-		ParseError:                 pi.ParseError,
 	}
 }
 
 // Update creates a full new PodInfo by default. And only updates the pod when the PodInfo
 // has been instantiated and the passed pod is the exact same one as the original pod.
-func (pi *PodInfo) Update(pod *v1.Pod) {
+func (pi *PodInfo) Update(pod *v1.Pod) error {
 	if pod != nil && pi.Pod != nil && pi.Pod.UID == pod.UID {
 		// PodInfo includes immutable information, and so it is safe to update the pod in place if it is
 		// the exact same pod
 		pi.Pod = pod
-		return
+		return nil
 	}
 	var preferredAffinityTerms []v1.WeightedPodAffinityTerm
 	var preferredAntiAffinityTerms []v1.WeightedPodAffinityTerm
@@ -183,7 +187,7 @@ func (pi *PodInfo) Update(pod *v1.Pod) {
 	pi.RequiredAntiAffinityTerms = requiredAntiAffinityTerms
 	pi.PreferredAffinityTerms = weightedAffinityTerms
 	pi.PreferredAntiAffinityTerms = weightedAntiAffinityTerms
-	pi.ParseError = utilerrors.NewAggregate(parseErrs)
+	return utilerrors.NewAggregate(parseErrs)
 }
 
 // AffinityTerm is a processed version of v1.PodAffinityTerm.
@@ -321,10 +325,10 @@ func getWeightedAffinityTerms(pod *v1.Pod, v1Terms []v1.WeightedPodAffinityTerm)
 }
 
 // NewPodInfo returns a new PodInfo.
-func NewPodInfo(pod *v1.Pod) *PodInfo {
+func NewPodInfo(pod *v1.Pod) (*PodInfo, error) {
 	pInfo := &PodInfo{}
-	pInfo.Update(pod)
-	return pInfo
+	err := pInfo.Update(pod)
+	return pInfo, err
 }
 
 func getPodAffinityTerms(affinity *v1.Affinity) (terms []v1.PodAffinityTerm) {
@@ -333,9 +337,9 @@ func getPodAffinityTerms(affinity *v1.Affinity) (terms []v1.PodAffinityTerm) {
 			terms = affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
 		}
 		// TODO: Uncomment this block when implement RequiredDuringSchedulingRequiredDuringExecution.
-		//if len(affinity.PodAffinity.RequiredDuringSchedulingRequiredDuringExecution) != 0 {
+		// if len(affinity.PodAffinity.RequiredDuringSchedulingRequiredDuringExecution) != 0 {
 		//	terms = append(terms, affinity.PodAffinity.RequiredDuringSchedulingRequiredDuringExecution...)
-		//}
+		// }
 	}
 	return terms
 }
@@ -346,9 +350,9 @@ func getPodAntiAffinityTerms(affinity *v1.Affinity) (terms []v1.PodAffinityTerm)
 			terms = affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution
 		}
 		// TODO: Uncomment this block when implement RequiredDuringSchedulingRequiredDuringExecution.
-		//if len(affinity.PodAntiAffinity.RequiredDuringSchedulingRequiredDuringExecution) != 0 {
+		// if len(affinity.PodAntiAffinity.RequiredDuringSchedulingRequiredDuringExecution) != 0 {
 		//	terms = append(terms, affinity.PodAntiAffinity.RequiredDuringSchedulingRequiredDuringExecution...)
-		//}
+		// }
 	}
 	return terms
 }
@@ -609,7 +613,10 @@ func (n *NodeInfo) AddPodInfo(podInfo *PodInfo) {
 
 // AddPod is a wrapper around AddPodInfo.
 func (n *NodeInfo) AddPod(pod *v1.Pod) {
-	n.AddPodInfo(NewPodInfo(pod))
+	// ignore this err since apiserver doesn't properly validate affinity terms
+	// and we can't fix the validation for backwards compatibility.
+	podInfo, _ := NewPodInfo(pod)
+	n.AddPodInfo(podInfo)
 }
 
 func podWithAffinity(p *v1.Pod) bool {

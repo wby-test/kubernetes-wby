@@ -42,6 +42,7 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config/testing/defaults"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
 )
 
 func TestSetup(t *testing.T) {
@@ -93,6 +94,7 @@ profiles:
 - plugins:
     multiPoint:
       enabled:
+      - name: SchedulingGates
       - name: DefaultBinder
       - name: PrioritySort
       - name: DefaultPreemption
@@ -131,6 +133,7 @@ profiles:
 - plugins:
     multiPoint:
       enabled:
+      - name: SchedulingGates
       - name: DefaultBinder
       - name: PrioritySort
       - name: DefaultPreemption
@@ -198,7 +201,7 @@ profiles:
 	// out-of-tree plugin config v1
 	outOfTreePluginConfigFilev1 := filepath.Join(tmpDir, "outOfTreePluginv1.yaml")
 	if err := os.WriteFile(outOfTreePluginConfigFilev1, []byte(fmt.Sprintf(`
-apiVersion: kubescheduler.config.k8s.io/v1beta3
+apiVersion: kubescheduler.config.k8s.io/v1
 kind: KubeSchedulerConfiguration
 clientConnection:
   kubeconfig: '%s'
@@ -315,29 +318,21 @@ leaderElection:
 		wantLeaderElection *componentbaseconfig.LeaderElectionConfiguration
 	}{
 		{
-			name: "default config with an alpha feature enabled",
+			name: "default config with two alpha features enabled",
 			flags: []string{
 				"--kubeconfig", configKubeconfig,
-				"--feature-gates=VolumeCapacityPriority=true",
+				"--feature-gates=VolumeCapacityPriority=true,PodSchedulingReadiness=true",
 			},
 			wantPlugins: map[string]*config.Plugins{
 				"default-scheduler": func() *config.Plugins {
-					plugins := &config.Plugins{
-						QueueSort:  defaults.ExpandedPluginsV1beta3.QueueSort,
-						PreFilter:  defaults.ExpandedPluginsV1beta3.PreFilter,
-						Filter:     defaults.ExpandedPluginsV1beta3.Filter,
-						PostFilter: defaults.ExpandedPluginsV1beta3.PostFilter,
-						PreScore:   defaults.ExpandedPluginsV1beta3.PreScore,
-						Score:      defaults.ExpandedPluginsV1beta3.Score,
-						Bind:       defaults.ExpandedPluginsV1beta3.Bind,
-						PreBind:    defaults.ExpandedPluginsV1beta3.PreBind,
-						Reserve:    defaults.ExpandedPluginsV1beta3.Reserve,
-					}
+					plugins := defaults.ExpandedPluginsV1.DeepCopy()
+					plugins.PreEnqueue.Enabled = append(plugins.PreEnqueue.Enabled, config.Plugin{Name: names.SchedulingGates})
 					return plugins
 				}(),
 			},
 			restoreFeatures: map[featuregate.Feature]bool{
 				features.VolumeCapacityPriority: false,
+				features.PodSchedulingReadiness: false,
 			},
 		},
 		{
@@ -346,7 +341,7 @@ leaderElection:
 				"--kubeconfig", configKubeconfig,
 			},
 			wantPlugins: map[string]*config.Plugins{
-				"default-scheduler": defaults.ExpandedPluginsV1beta3,
+				"default-scheduler": defaults.ExpandedPluginsV1,
 			},
 		},
 		{
@@ -397,7 +392,8 @@ leaderElection:
 			},
 			wantPlugins: map[string]*config.Plugins{
 				"default-scheduler": {
-					Bind: config.PluginSet{Enabled: []config.Plugin{{Name: "DefaultBinder"}}},
+					PreEnqueue: config.PluginSet{Enabled: []config.Plugin{{Name: "SchedulingGates"}}},
+					Bind:       config.PluginSet{Enabled: []config.Plugin{{Name: "DefaultBinder"}}},
 					Filter: config.PluginSet{
 						Enabled: []config.Plugin{
 							{Name: "NodeResourcesFit"},
@@ -437,7 +433,8 @@ leaderElection:
 			},
 			wantPlugins: map[string]*config.Plugins{
 				"default-scheduler": {
-					Bind: config.PluginSet{Enabled: []config.Plugin{{Name: "DefaultBinder"}}},
+					PreEnqueue: config.PluginSet{Enabled: []config.Plugin{{Name: "SchedulingGates"}}},
+					Bind:       config.PluginSet{Enabled: []config.Plugin{{Name: "DefaultBinder"}}},
 					Filter: config.PluginSet{
 						Enabled: []config.Plugin{
 							{Name: "NodeResourcesFit"},
@@ -528,7 +525,8 @@ leaderElection:
 			registryOptions: []Option{WithPlugin("Foo", newFoo)},
 			wantPlugins: map[string]*config.Plugins{
 				"default-scheduler": {
-					Bind: defaults.ExpandedPluginsV1.Bind,
+					PreEnqueue: defaults.ExpandedPluginsV1.PreEnqueue,
+					Bind:       defaults.ExpandedPluginsV1.Bind,
 					Filter: config.PluginSet{
 						Enabled: append(defaults.ExpandedPluginsV1.Filter.Enabled, config.Plugin{Name: "Foo"}),
 					},
