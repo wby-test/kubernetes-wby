@@ -173,17 +173,17 @@ func (p *restrictedProfile) Apply(pod *corev1.Pod, containerName string, target 
 		return fmt.Errorf("restricted profile: %s", err)
 	}
 
+	clearSecurityContext(pod, containerName)
 	disallowRoot(pod, containerName)
 	dropCapabilities(pod, containerName)
+	disallowPrivilegeEscalation(pod, containerName)
+	setSeccompProfile(pod, containerName)
 
 	switch style {
-	case node:
-		clearSecurityContext(pod, containerName)
-
 	case podCopy:
 		shareProcessNamespace(pod)
 
-	case ephemeral:
+	case ephemeral, node:
 		// no additional modifications needed
 	}
 
@@ -217,6 +217,7 @@ func removeLabelsAndProbes(p *corev1.Pod) {
 	for i := range p.Spec.Containers {
 		p.Spec.Containers[i].LivenessProbe = nil
 		p.Spec.Containers[i].ReadinessProbe = nil
+		p.Spec.Containers[i].StartupProbe = nil
 	}
 }
 
@@ -252,7 +253,9 @@ func useHostNamespaces(p *corev1.Pod) {
 // shareProcessNamespace configures all containers in the pod to share the
 // process namespace.
 func shareProcessNamespace(p *corev1.Pod) {
-	p.Spec.ShareProcessNamespace = pointer.Bool(true)
+	if p.Spec.ShareProcessNamespace == nil {
+		p.Spec.ShareProcessNamespace = pointer.Bool(true)
+	}
 }
 
 // clearSecurityContext clears the security context for the container.
@@ -286,9 +289,10 @@ func disallowRoot(p *corev1.Pod, containerName string) {
 		if c.Name != containerName {
 			return true
 		}
-		c.SecurityContext = &corev1.SecurityContext{
-			RunAsNonRoot: pointer.Bool(true),
+		if c.SecurityContext == nil {
+			c.SecurityContext = &corev1.SecurityContext{}
 		}
+		c.SecurityContext.RunAsNonRoot = pointer.Bool(true)
 		return false
 	})
 }
@@ -302,9 +306,11 @@ func dropCapabilities(p *corev1.Pod, containerName string) {
 		if c.SecurityContext == nil {
 			c.SecurityContext = &corev1.SecurityContext{}
 		}
-		c.SecurityContext.Capabilities = &corev1.Capabilities{
-			Drop: []corev1.Capability{"ALL"},
+		if c.SecurityContext.Capabilities == nil {
+			c.SecurityContext.Capabilities = &corev1.Capabilities{}
 		}
+		c.SecurityContext.Capabilities.Drop = []corev1.Capability{"ALL"}
+		c.SecurityContext.Capabilities.Add = nil
 		return false
 	})
 }
@@ -339,4 +345,32 @@ func addCapability(c *corev1.Container, capability corev1.Capability) {
 		c.SecurityContext.Capabilities = &corev1.Capabilities{}
 	}
 	c.SecurityContext.Capabilities.Add = append(c.SecurityContext.Capabilities.Add, capability)
+}
+
+// disallowPrivilegeEscalation configures the containers not allowed PrivilegeEscalation
+func disallowPrivilegeEscalation(p *corev1.Pod, containerName string) {
+	podutils.VisitContainers(&p.Spec, podutils.AllContainers, func(c *corev1.Container, _ podutils.ContainerType) bool {
+		if c.Name != containerName {
+			return true
+		}
+		if c.SecurityContext == nil {
+			c.SecurityContext = &corev1.SecurityContext{}
+		}
+		c.SecurityContext.AllowPrivilegeEscalation = pointer.Bool(false)
+		return false
+	})
+}
+
+// setSeccompProfile apply SeccompProfile to the containers
+func setSeccompProfile(p *corev1.Pod, containerName string) {
+	podutils.VisitContainers(&p.Spec, podutils.AllContainers, func(c *corev1.Container, _ podutils.ContainerType) bool {
+		if c.Name != containerName {
+			return true
+		}
+		if c.SecurityContext == nil {
+			c.SecurityContext = &corev1.SecurityContext{}
+		}
+		c.SecurityContext.SeccompProfile = &corev1.SeccompProfile{Type: "RuntimeDefault"}
+		return false
+	})
 }

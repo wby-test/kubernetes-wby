@@ -74,6 +74,7 @@ type KubeControllerManagerOptions struct {
 	HPAController                    *HPAControllerOptions
 	JobController                    *JobControllerOptions
 	CronJobController                *CronJobControllerOptions
+	LegacySATokenCleaner             *LegacySATokenCleanerOptions
 	NamespaceController              *NamespaceControllerOptions
 	NodeIPAMController               *NodeIPAMControllerOptions
 	NodeLifecycleController          *NodeLifecycleControllerOptions
@@ -92,7 +93,6 @@ type KubeControllerManagerOptions struct {
 	Logs           *logs.Options
 
 	Master                      string
-	Kubeconfig                  string
 	ShowHiddenMetricsForVersion string
 }
 
@@ -150,6 +150,9 @@ func NewKubeControllerManagerOptions() (*KubeControllerManagerOptions, error) {
 		},
 		CronJobController: &CronJobControllerOptions{
 			&componentConfig.CronJobController,
+		},
+		LegacySATokenCleaner: &LegacySATokenCleanerOptions{
+			&componentConfig.LegacySATokenCleaner,
 		},
 		NamespaceController: &NamespaceControllerOptions{
 			&componentConfig.NamespaceController,
@@ -245,6 +248,7 @@ func (s *KubeControllerManagerOptions) Flags(allControllers []string, disabledBy
 	s.HPAController.AddFlags(fss.FlagSet("horizontalpodautoscaling controller"))
 	s.JobController.AddFlags(fss.FlagSet("job controller"))
 	s.CronJobController.AddFlags(fss.FlagSet("cronjob controller"))
+	s.LegacySATokenCleaner.AddFlags(fss.FlagSet("legacy service account token cleaner"))
 	s.NamespaceController.AddFlags(fss.FlagSet("namespace controller"))
 	s.NodeIPAMController.AddFlags(fss.FlagSet("nodeipam controller"))
 	s.NodeLifecycleController.AddFlags(fss.FlagSet("nodelifecycle controller"))
@@ -260,7 +264,7 @@ func (s *KubeControllerManagerOptions) Flags(allControllers []string, disabledBy
 
 	fs := fss.FlagSet("misc")
 	fs.StringVar(&s.Master, "master", s.Master, "The address of the Kubernetes API server (overrides any value in kubeconfig).")
-	fs.StringVar(&s.Kubeconfig, "kubeconfig", s.Kubeconfig, "Path to kubeconfig file with authorization and master location information.")
+	fs.StringVar(&s.Generic.ClientConnection.Kubeconfig, "kubeconfig", s.Generic.ClientConnection.Kubeconfig, "Path to kubeconfig file with authorization and master location information (the master location can be overridden by the master flag).")
 	utilfeature.DefaultMutableFeatureGate.AddFlag(fss.FlagSet("generic"))
 
 	return fss
@@ -314,6 +318,9 @@ func (s *KubeControllerManagerOptions) ApplyTo(c *kubecontrollerconfig.Config) e
 		return err
 	}
 	if err := s.CronJobController.ApplyTo(&c.ComponentConfig.CronJobController); err != nil {
+		return err
+	}
+	if err := s.LegacySATokenCleaner.ApplyTo(&c.ComponentConfig.LegacySATokenCleaner); err != nil {
 		return err
 	}
 	if err := s.NamespaceController.ApplyTo(&c.ComponentConfig.NamespaceController); err != nil {
@@ -383,6 +390,7 @@ func (s *KubeControllerManagerOptions) Validate(allControllers []string, disable
 	errs = append(errs, s.HPAController.Validate()...)
 	errs = append(errs, s.JobController.Validate()...)
 	errs = append(errs, s.CronJobController.Validate()...)
+	errs = append(errs, s.LegacySATokenCleaner.Validate()...)
 	errs = append(errs, s.NamespaceController.Validate()...)
 	errs = append(errs, s.NodeIPAMController.Validate()...)
 	errs = append(errs, s.NodeLifecycleController.Validate()...)
@@ -414,7 +422,7 @@ func (s KubeControllerManagerOptions) Config(allControllers []string, disabledBy
 		return nil, fmt.Errorf("error creating self-signed certificates: %v", err)
 	}
 
-	kubeconfig, err := clientcmd.BuildConfigFromFlags(s.Master, s.Kubeconfig)
+	kubeconfig, err := clientcmd.BuildConfigFromFlags(s.Master, s.Generic.ClientConnection.Kubeconfig)
 	if err != nil {
 		return nil, err
 	}

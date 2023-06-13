@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"reflect"
 	"strings"
 	"sync"
@@ -607,41 +608,69 @@ func TestDetectSafeNotMountedBehavior(t *testing.T) {
 	}
 }
 
-func TestFormat(t *testing.T) {
+func TestCheckUmountError(t *testing.T) {
+	target := "/test/path"
+	withSafeNotMountedBehavior := true
+	command := exec.Command("uname", "-r") // dummy command return status 0
+
+	if err := command.Run(); err != nil {
+		t.Errorf("Faild to exec dummy command. err: %s", err)
+	}
+
+	testcases := []struct {
+		output   []byte
+		err      error
+		expected bool
+	}{
+		{
+			err:      errors.New("wait: no child processes"),
+			expected: true,
+		},
+		{
+			output:   []byte("umount: /test/path: not mounted."),
+			err:      errors.New("exit status 1"),
+			expected: true,
+		},
+		{
+			output:   []byte("umount: /test/path: No such file or directory"),
+			err:      errors.New("exit status 1"),
+			expected: false,
+		},
+	}
+
+	for _, v := range testcases {
+		if err := checkUmountError(target, command, v.output, v.err, withSafeNotMountedBehavior); (err == nil) != v.expected {
+			if v.expected {
+				t.Errorf("Expected to return nil, but did not. err: %s", err)
+			} else {
+				t.Errorf("Expected to return error, but did not.")
+			}
+		}
+	}
+}
+
+// TODO https://github.com/kubernetes/kubernetes/pull/117539#discussion_r1181873355
+func TestFormatConcurrency(t *testing.T) {
 	const (
 		formatCount    = 5
 		fstype         = "ext4"
 		output         = "complete"
-		cmdDuration    = 1 * time.Millisecond
 		defaultTimeout = 1 * time.Minute
 	)
 
 	tests := []struct {
-		desc           string
-		max            int
-		timeout        time.Duration
-		wantConcurrent int
+		desc    string
+		max     int
+		timeout time.Duration
 	}{
 		{
-			max:            0,
-			wantConcurrent: formatCount,
+			max: 2,
 		},
 		{
-			max:            -1,
-			wantConcurrent: formatCount,
+			max: 3,
 		},
 		{
-			max:            1,
-			wantConcurrent: 1,
-		},
-		{
-			max:            3,
-			wantConcurrent: 3,
-		},
-		{
-			max:            3,
-			timeout:        1 * time.Nanosecond,
-			wantConcurrent: formatCount,
+			max: 4,
 		},
 	}
 
@@ -651,20 +680,18 @@ func TestFormat(t *testing.T) {
 				tc.timeout = defaultTimeout
 			}
 
-			var concurrent, maxConcurrent int
+			var concurrent int
 			var mu sync.Mutex
+			witness := make(chan struct{})
 
 			exec := &testexec.FakeExec{}
 			for i := 0; i < formatCount; i++ {
 				exec.CommandScript = append(exec.CommandScript, makeFakeCommandAction(output, nil, func() {
 					mu.Lock()
 					concurrent++
-					if concurrent > maxConcurrent {
-						maxConcurrent = concurrent
-					}
 					mu.Unlock()
 
-					time.Sleep(cmdDuration)
+					<-witness
 
 					mu.Lock()
 					concurrent--
@@ -673,21 +700,109 @@ func TestFormat(t *testing.T) {
 			}
 			mounter := NewSafeFormatAndMount(nil, exec, WithMaxConcurrentFormat(tc.max, tc.timeout))
 
-			var wg sync.WaitGroup
-			for i := 0; i < formatCount; i++ {
-				wg.Add(1)
+			// we run max+1 goroutines and block the command execution
+			// only max goroutine should be running and the additional one should wait
+			// for one to be released
+			for i := 0; i < tc.max+1; i++ {
 				go func() {
-					defer wg.Done()
 					mounter.format(fstype, nil)
 				}()
 			}
-			wg.Wait()
 
-			if maxConcurrent != tc.wantConcurrent {
-				t.Errorf("SafeFormatAndMount.format() got concurrency: %d, want: %d", maxConcurrent, tc.wantConcurrent)
+			// wait for all goorutines to be scheduled
+			time.Sleep(100 * time.Millisecond)
+
+			mu.Lock()
+			if concurrent != tc.max {
+				t.Errorf("SafeFormatAndMount.format() got concurrency: %d, want: %d", concurrent, tc.max)
 			}
+			mu.Unlock()
+
+			// signal the commands to finish the goroutines, this will allow the command
+			// that is pending to be executed
+			for i := 0; i < tc.max; i++ {
+				witness <- struct{}{}
+			}
+
+			// wait for all goroutines to acquire the lock and decrement the counter
+			time.Sleep(100 * time.Millisecond)
+
+			mu.Lock()
+			if concurrent != 1 {
+				t.Errorf("SafeFormatAndMount.format() got concurrency: %d, want: 1", concurrent)
+			}
+			mu.Unlock()
+
+			// signal the pending command to finish, no more command should be running
+			close(witness)
+
+			// wait a few for the last goroutine to acquire the lock and decrements the counter down to zero
+			time.Sleep(10 * time.Millisecond)
+
+			mu.Lock()
+			if concurrent != 0 {
+				t.Errorf("SafeFormatAndMount.format() got concurrency: %d, want: 0", concurrent)
+			}
+			mu.Unlock()
 		})
 	}
+}
+
+// TODO https://github.com/kubernetes/kubernetes/pull/117539#discussion_r1181873355
+func TestFormatTimeout(t *testing.T) {
+	const (
+		formatCount    = 5
+		fstype         = "ext4"
+		output         = "complete"
+		maxConcurrency = 4
+		timeout        = 200 * time.Millisecond
+	)
+
+	var concurrent int
+	var mu sync.Mutex
+	witness := make(chan struct{})
+
+	exec := &testexec.FakeExec{}
+	for i := 0; i < formatCount; i++ {
+		exec.CommandScript = append(exec.CommandScript, makeFakeCommandAction(output, nil, func() {
+			mu.Lock()
+			concurrent++
+			mu.Unlock()
+
+			<-witness
+
+			mu.Lock()
+			concurrent--
+			mu.Unlock()
+		}))
+	}
+	mounter := NewSafeFormatAndMount(nil, exec, WithMaxConcurrentFormat(maxConcurrency, timeout))
+
+	for i := 0; i < maxConcurrency+1; i++ {
+		go func() {
+			mounter.format(fstype, nil)
+		}()
+	}
+
+	// wait a bit more than the configured timeout
+	time.Sleep(timeout + 100*time.Millisecond)
+
+	mu.Lock()
+	if concurrent != maxConcurrency+1 {
+		t.Errorf("SafeFormatAndMount.format() got concurrency: %d, want: %d", concurrent, maxConcurrency+1)
+	}
+	mu.Unlock()
+
+	// signal the pending commands to finish
+	close(witness)
+	// wait for all goroutines to acquire the lock and decrement the counter
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	if concurrent != 0 {
+		t.Errorf("SafeFormatAndMount.format() got concurrency: %d, want: 0", concurrent)
+	}
+	mu.Unlock()
 }
 
 func makeFakeCommandAction(stdout string, err error, cmdFn func()) testexec.FakeCommandAction {

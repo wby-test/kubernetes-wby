@@ -41,7 +41,6 @@ import (
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/klog/v2"
 
-	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	"k8s.io/kubernetes/test/e2e/framework/internal/junit"
 	"k8s.io/kubernetes/test/utils/image"
 	"k8s.io/kubernetes/test/utils/kubeconfig"
@@ -189,6 +188,13 @@ type TestContextType struct {
 	// DockerConfigFile is a file that contains credentials which can be used to pull images from certain private registries, needed for a test.
 	DockerConfigFile string
 
+	// E2EDockerConfigFile is a docker credentials configuration file used which contains authorization token that can be used to pull images from certain private registries provided by the users.
+	// For more details refer https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/#log-in-to-docker-hub
+	E2EDockerConfigFile string
+
+	// KubeTestRepoConfigFile is a yaml file used for overriding registries for test images.
+	KubeTestRepoList string
+
 	// SnapshotControllerPodName is the name used for identifying the snapshot controller pod.
 	SnapshotControllerPodName string
 
@@ -237,8 +243,6 @@ type NodeTestContextType struct {
 	NodeConformance bool
 	// PrepullImages indicates whether node e2e framework should prepull images.
 	PrepullImages bool
-	// KubeletConfig is the kubelet configuration the test is running against.
-	KubeletConfig kubeletconfig.KubeletConfiguration
 	// ImageDescription is the description of the image on which the test is running.
 	ImageDescription string
 	// RuntimeConfig is a map of API server runtime configuration values.
@@ -251,6 +255,8 @@ type NodeTestContextType struct {
 	RestartKubelet bool
 	// ExtraEnvs is a map of environment names to values.
 	ExtraEnvs map[string]string
+	// StandaloneMode indicates whether the test is running kubelet in a standalone mode.
+	StandaloneMode bool
 }
 
 // CloudConfig holds the cloud configuration for e2e test suites.
@@ -347,19 +353,17 @@ func RegisterCommonFlags(flags *flag.FlagSet) {
 	flags.StringVar(&TestContext.SystemdServices, "systemd-services", "docker", "The comma separated list of systemd services the framework will dump logs for.")
 	flags.BoolVar(&TestContext.DumpSystemdJournal, "dump-systemd-journal", false, "Whether to dump the full systemd journal.")
 	flags.StringVar(&TestContext.ImageServiceEndpoint, "image-service-endpoint", "", "The image service endpoint of cluster VM instances.")
-	// TODO: remove the node-role.kubernetes.io/master taint in 1.25 or later.
-	// The change will likely require an action for some users that do not
-	// use k8s originated tools like kubeadm or kOps for creating clusters
-	// and taint their control plane nodes with "master", expecting the test
-	// suite to work with this legacy non-blocking taint.
-	flags.StringVar(&TestContext.NonblockingTaints, "non-blocking-taints", `node-role.kubernetes.io/control-plane,node-role.kubernetes.io/master`, "Nodes with taints in this comma-delimited list will not block the test framework from starting tests. The default taint 'node-role.kubernetes.io/master' is DEPRECATED and will be removed from the list in a future release.")
+	flags.StringVar(&TestContext.NonblockingTaints, "non-blocking-taints", `node-role.kubernetes.io/control-plane`, "Nodes with taints in this comma-delimited list will not block the test framework from starting tests.")
 
 	flags.BoolVar(&TestContext.ListImages, "list-images", false, "If true, will show list of images used for running tests.")
 	flags.StringVar(&TestContext.KubectlPath, "kubectl-path", "kubectl", "The kubectl binary to use. For development, you might use 'cluster/kubectl.sh' here.")
 
 	flags.StringVar(&TestContext.ProgressReportURL, "progress-report-url", "", "The URL to POST progress updates to as the suite runs to assist in aiding integrations. If empty, no messages sent.")
 	flags.StringVar(&TestContext.SpecSummaryOutput, "spec-dump", "", "The file to dump all ginkgo.SpecSummary to after tests run. If empty, no objects are saved/printed.")
-	flags.StringVar(&TestContext.DockerConfigFile, "docker-config-file", "", "A file that contains credentials which can be used to pull images from certain private registries, needed for a test.")
+	flags.StringVar(&TestContext.DockerConfigFile, "docker-config-file", "", "A docker credential file which contains authorization token that is used to perform image pull tests from an authenticated registry. For more details regarding the content of the file refer https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/#log-in-to-docker-hub")
+
+	flags.StringVar(&TestContext.E2EDockerConfigFile, "e2e-docker-config-file", "", "A docker credentials configuration file used which contains authorization token that can be used to pull images from certain private registries provided by the users. For more details refer https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/#log-in-to-docker-hub")
+	flags.StringVar(&TestContext.KubeTestRepoList, "kube-test-repo-list", "", "A yaml file used for overriding registries for test images. Alternatively, the KUBE_TEST_REPO_LIST env variable can be set.")
 
 	flags.StringVar(&TestContext.SnapshotControllerPodName, "snapshot-controller-pod-name", "", "The pod name to use for identifying the snapshot controller in the kube-system namespace.")
 	flags.IntVar(&TestContext.SnapshotControllerHTTPPort, "snapshot-controller-http-port", 0, "The port to use for snapshot controller HTTP communication.")
@@ -463,6 +467,9 @@ func AfterReadingAllFlags(t *TestContextType) {
 
 	// These flags are not exposed via the normal command line flag set,
 	// therefore we have to use our own private one here.
+	if t.KubeTestRepoList != "" {
+		image.Init(t.KubeTestRepoList)
+	}
 	var fs flag.FlagSet
 	klog.InitFlags(&fs)
 	fs.Set("logtostderr", "false")

@@ -25,7 +25,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
@@ -33,6 +32,7 @@ import (
 	testutils "k8s.io/kubernetes/test/utils"
 	admissionapi "k8s.io/pod-security-admission/api"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
@@ -64,7 +64,7 @@ var _ = SIGDescribe("NodeLease", func() {
 				return nil
 			}, 5*time.Minute, 5*time.Second).Should(gomega.BeNil())
 			// check basic expectations for the lease
-			gomega.Expect(expectLease(lease, nodeName)).To(gomega.BeNil())
+			framework.ExpectNoError(expectLease(lease, nodeName))
 
 			ginkgo.By("check that node lease is updated at least once within the lease duration")
 			gomega.Eventually(ctx, func() error {
@@ -126,7 +126,7 @@ var _ = SIGDescribe("NodeLease", func() {
 				return nil
 			}, 5*time.Minute, 5*time.Second).Should(gomega.BeNil())
 			// check basic expectations for the lease
-			gomega.Expect(expectLease(lease, nodeName)).To(gomega.BeNil())
+			framework.ExpectNoError(expectLease(lease, nodeName))
 			leaseDuration := time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second
 
 			ginkgo.By("verify NodeStatus report period is longer than lease duration")
@@ -159,7 +159,7 @@ var _ = SIGDescribe("NodeLease", func() {
 				if !apiequality.Semantic.DeepEqual(lastStatus, currentStatus) {
 					// heartbeat time changed, but there were relevant changes in the status, keep waiting
 					framework.Logf("node status heartbeat changed in %s (with other status changes), waiting for %s", currentHeartbeatTime.Sub(lastHeartbeatTime), leaseDuration)
-					framework.Logf("%s", diff.ObjectReflectDiff(lastStatus, currentStatus))
+					framework.Logf("%s", cmp.Diff(lastStatus, currentStatus))
 					lastHeartbeatTime = currentHeartbeatTime
 					lastObserved = currentObserved
 					lastStatus = currentStatus

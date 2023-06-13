@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"runtime"
 	"sync"
 	"time"
 
@@ -45,9 +46,6 @@ const (
 	imagePullRetryDelay = time.Second
 	// Number of parallel count to pull images.
 	maxParallelImagePullCount = 5
-
-	// SampleDevicePluginDSYAML is the path of the daemonset template of the sample device plugin. // TODO: Parametrize it by making it a feature in TestFramework.
-	SampleDevicePluginDSYAML = "test/e2e/testing-manifests/sample-device-plugin.yaml"
 )
 
 // NodePrePullImageList is a list of images used in node e2e test. These images will be prepulled
@@ -64,7 +62,6 @@ var NodePrePullImageList = sets.NewString(
 	imageutils.GetPauseImageName(),
 	imageutils.GetE2EImage(imageutils.NodePerfNpbEp),
 	imageutils.GetE2EImage(imageutils.NodePerfNpbIs),
-	imageutils.GetE2EImage(imageutils.NodePerfTfWideDeep),
 	imageutils.GetE2EImage(imageutils.Etcd),
 )
 
@@ -73,6 +70,11 @@ var NodePrePullImageList = sets.NewString(
 // 2. the ones passed in from framework.TestContext.ExtraEnvs
 // So this function needs to be called after the extra envs are applied.
 func updateImageAllowList(ctx context.Context) {
+	// Architecture-specific image
+	if !isRunningOnArm64() {
+		// NodePerfTfWideDeep is only supported on x86_64, pulling in arm64 will fail
+		NodePrePullImageList = NodePrePullImageList.Insert(imageutils.GetE2EImage(imageutils.NodePerfTfWideDeep))
+	}
 	// Union NodePrePullImageList and PrePulledImages into the framework image pre-pull list.
 	e2epod.ImagePrePullList = NodePrePullImageList.Union(commontest.PrePulledImages)
 	// Images from extra envs
@@ -87,16 +89,20 @@ func updateImageAllowList(ctx context.Context) {
 	} else {
 		e2epod.ImagePrePullList.Insert(gpuDevicePluginImage)
 	}
-	if kubeVirtPluginImage, err := getKubeVirtDevicePluginImage(); err != nil {
-		klog.Errorln(err)
-	} else {
-		e2epod.ImagePrePullList.Insert(kubeVirtPluginImage)
-	}
-	if samplePluginImage, err := getSampleDevicePluginImage(); err != nil {
+	if samplePluginImage, err := getContainerImageFromE2ETestDaemonset(SampleDevicePluginDSYAML); err != nil {
 		klog.Errorln(err)
 	} else {
 		e2epod.ImagePrePullList.Insert(samplePluginImage)
 	}
+	if samplePluginImageCtrlReg, err := getContainerImageFromE2ETestDaemonset(SampleDevicePluginControlRegistrationDSYAML); err != nil {
+		klog.Errorln(err)
+	} else {
+		e2epod.ImagePrePullList.Insert(samplePluginImageCtrlReg)
+	}
+}
+
+func isRunningOnArm64() bool {
+	return runtime.GOARCH == "arm64"
 }
 
 func getNodeProblemDetectorImage() string {
@@ -227,19 +233,19 @@ func getGPUDevicePluginImage(ctx context.Context) (string, error) {
 	return ds.Spec.Template.Spec.Containers[0].Image, nil
 }
 
-func getSampleDevicePluginImage() (string, error) {
-	data, err := e2etestfiles.Read(SampleDevicePluginDSYAML)
+func getContainerImageFromE2ETestDaemonset(dsYamlPath string) (string, error) {
+	data, err := e2etestfiles.Read(dsYamlPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to read the sample plugin yaml: %w", err)
+		return "", fmt.Errorf("failed to read the daemonset yaml: %w", err)
 	}
 
 	ds, err := e2emanifest.DaemonSetFromData(data)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse daemon set for sample plugin: %w", err)
+		return "", fmt.Errorf("failed to parse daemonset yaml: %w", err)
 	}
 
 	if len(ds.Spec.Template.Spec.Containers) < 1 {
-		return "", fmt.Errorf("failed to parse the sample plugin image: cannot extract the container from YAML")
+		return "", fmt.Errorf("failed to parse the container image: cannot extract the container from YAML")
 	}
 	return ds.Spec.Template.Spec.Containers[0].Image, nil
 }
@@ -247,26 +253,6 @@ func getSampleDevicePluginImage() (string, error) {
 // getSRIOVDevicePluginImage returns the image of SRIOV device plugin.
 func getSRIOVDevicePluginImage() (string, error) {
 	data, err := e2etestfiles.Read(SRIOVDevicePluginDSYAML)
-	if err != nil {
-		return "", fmt.Errorf("failed to read the device plugin manifest: %w", err)
-	}
-	ds, err := e2emanifest.DaemonSetFromData(data)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse the device plugin image: %w", err)
-	}
-	if ds == nil {
-		return "", fmt.Errorf("failed to parse the device plugin image: the extracted DaemonSet is nil")
-	}
-	if len(ds.Spec.Template.Spec.Containers) < 1 {
-		return "", fmt.Errorf("failed to parse the device plugin image: cannot extract the container from YAML")
-	}
-	return ds.Spec.Template.Spec.Containers[0].Image, nil
-}
-
-// TODO generilize this function with above one
-// getKubeVirtDevicePluginImage returns the image of SRIOV device plugin.
-func getKubeVirtDevicePluginImage() (string, error) {
-	data, err := e2etestfiles.Read(KubeVirtDevicePluginDSYAML)
 	if err != nil {
 		return "", fmt.Errorf("failed to read the device plugin manifest: %w", err)
 	}

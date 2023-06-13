@@ -199,8 +199,8 @@ func ShouldSkipService(service *v1.Service) bool {
 
 // AddressSet validates the addresses in the slice using the "isValid" function.
 // Addresses that pass the validation are returned as a string Set.
-func AddressSet(isValid func(ip net.IP) bool, addrs []net.Addr) sets.String {
-	ips := sets.NewString()
+func AddressSet(isValid func(ip net.IP) bool, addrs []net.Addr) sets.Set[string] {
+	ips := sets.New[string]()
 	for _, a := range addrs {
 		var ip net.IP
 		switch v := a.(type) {
@@ -481,6 +481,11 @@ func (buf *LineBuffer) Reset() {
 // Bytes returns the contents of buf as a []byte
 func (buf *LineBuffer) Bytes() []byte {
 	return buf.b.Bytes()
+}
+
+// String returns the contents of buf as a string
+func (buf *LineBuffer) String() string {
+	return buf.b.String()
 }
 
 // Lines returns the number of lines in buf. Note that more precisely, this returns the

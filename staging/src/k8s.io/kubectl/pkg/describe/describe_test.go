@@ -667,7 +667,7 @@ func TestDescribeService(t *testing.T) {
 						Name:       "port-tcp",
 						Port:       8080,
 						Protocol:   corev1.ProtocolTCP,
-						TargetPort: intstr.FromInt(9527),
+						TargetPort: intstr.FromInt32(9527),
 						NodePort:   31111,
 					}},
 					Selector:              map[string]string{"blah": "heh"},
@@ -2772,7 +2772,7 @@ func TestDescribeIngress(t *testing.T) {
 	ingresClassName := "test"
 	backendV1beta1 := networkingv1beta1.IngressBackend{
 		ServiceName: "default-backend",
-		ServicePort: intstr.FromInt(80),
+		ServicePort: intstr.FromInt32(80),
 	}
 	v1beta1 := fake.NewSimpleClientset(&networkingv1beta1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
@@ -3332,7 +3332,7 @@ func TestDescribeCSINode(t *testing.T) {
 }
 
 func TestDescribePodDisruptionBudgetV1beta1(t *testing.T) {
-	minAvailable := intstr.FromInt(22)
+	minAvailable := intstr.FromInt32(22)
 	f := fake.NewSimpleClientset(&policyv1beta1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:         "ns1",
@@ -3360,7 +3360,7 @@ func TestDescribePodDisruptionBudgetV1beta1(t *testing.T) {
 }
 
 func TestDescribePodDisruptionBudgetV1(t *testing.T) {
-	minAvailable := intstr.FromInt(22)
+	minAvailable := intstr.FromInt32(22)
 	f := fake.NewSimpleClientset(&policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:         "ns1",
@@ -4851,8 +4851,8 @@ Spec:
   Policy Types: Ingress, Egress
 `
 
-	port80 := intstr.FromInt(80)
-	port82 := intstr.FromInt(82)
+	port80 := intstr.FromInt32(80)
+	port82 := intstr.FromInt32(82)
 	protoTCP := corev1.ProtocolTCP
 
 	versionedFake := fake.NewSimpleClientset(&networkingv1.NetworkPolicy{
@@ -5036,8 +5036,8 @@ Spec:
   Policy Types: Ingress
 `
 
-	port80 := intstr.FromInt(80)
-	port82 := intstr.FromInt(82)
+	port80 := intstr.FromInt32(80)
+	port82 := intstr.FromInt32(82)
 	protoTCP := corev1.ProtocolTCP
 
 	versionedFake := fake.NewSimpleClientset(&networkingv1.NetworkPolicy{
@@ -5164,8 +5164,8 @@ Spec:
   Policy Types: Ingress, Egress
 `
 
-	port80 := intstr.FromInt(80)
-	port82 := intstr.FromInt(82)
+	port80 := intstr.FromInt32(80)
+	port82 := intstr.FromInt32(82)
 	protoTCP := corev1.ProtocolTCP
 
 	versionedFake := fake.NewSimpleClientset(&networkingv1.NetworkPolicy{
@@ -5675,6 +5675,54 @@ Events:           <none>` + "\n",
 		t.Run(name, func(t *testing.T) {
 			c := &describeClient{T: t, Namespace: "foo", Interface: tc.input}
 			d := ClusterCIDRDescriber{c}
+			out, err := d.Describe("bar", "foo.123", DescriberSettings{ShowEvents: true})
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if out != tc.output {
+				t.Errorf("expected :\n%s\nbut got output:\n%s diff:\n%s", tc.output, out, cmp.Diff(tc.output, out))
+			}
+		})
+	}
+}
+
+func TestDescribeIPAddress(t *testing.T) {
+
+	testcases := map[string]struct {
+		input  *fake.Clientset
+		output string
+	}{
+		"IPAddress v1alpha1": {
+			input: fake.NewSimpleClientset(&networkingv1alpha1.IPAddress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo.123",
+				},
+				Spec: networkingv1alpha1.IPAddressSpec{
+					ParentRef: &networkingv1alpha1.ParentReference{
+						Group:     "mygroup",
+						Resource:  "myresource",
+						Namespace: "mynamespace",
+						Name:      "myname",
+					},
+				},
+			}),
+
+			output: `Name:         foo.123
+Labels:       <none>
+Annotations:  <none>
+Parent Reference:
+  Group:      mygroup
+  Resource:   myresource
+  Namespace:  mynamespace
+  Name:       myname
+Events:       <none>` + "\n",
+		},
+	}
+
+	for name, tc := range testcases {
+		t.Run(name, func(t *testing.T) {
+			c := &describeClient{T: t, Namespace: "foo", Interface: tc.input}
+			d := IPAddressDescriber{c}
 			out, err := d.Describe("bar", "foo.123", DescriberSettings{ShowEvents: true})
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)

@@ -50,6 +50,7 @@ import (
 	"k8s.io/kubernetes/test/utils/crd"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 	admissionapi "k8s.io/pod-security-admission/api"
+	"k8s.io/utils/pointer"
 
 	"github.com/onsi/ginkgo/v2"
 )
@@ -1006,7 +1007,7 @@ var _ = SIGDescribe("ResourceQuota", func() {
 		reported hard status values MUST equal the new spec hard values.
 		Getting the /status MUST succeed and the reported hard status
 		values MUST equal the spec hard values. Repatching the hard status
-		values MUST succeed. The spec spec MUST NOT be changed when
+		values MUST succeed. The spec MUST NOT be changed when
 		patching /status.
 	*/
 	framework.ConformanceIt("should apply changes to a resourcequota status", func(ctx context.Context) {
@@ -1992,7 +1993,7 @@ func newTestReplicationControllerForQuota(name, image string, replicas int32) *v
 			Name: name,
 		},
 		Spec: v1.ReplicationControllerSpec{
-			Replicas: func(i int32) *int32 { return &i }(replicas),
+			Replicas: pointer.Int32(replicas),
 			Selector: map[string]string{
 				"name": name,
 			},
