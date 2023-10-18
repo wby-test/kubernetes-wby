@@ -27,9 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/client-go/informers/networking/v1alpha1"
 	"k8s.io/klog/v2"
-	"k8s.io/kubernetes/pkg/features"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -43,7 +41,6 @@ import (
 	servicecontroller "k8s.io/cloud-provider/controllers/service"
 	"k8s.io/controller-manager/controller"
 	csitrans "k8s.io/csi-translation-lib"
-	"k8s.io/kubernetes/cmd/kube-controller-manager/app/options"
 	pkgcontroller "k8s.io/kubernetes/pkg/controller"
 	endpointcontroller "k8s.io/kubernetes/pkg/controller/endpoint"
 	"k8s.io/kubernetes/pkg/controller/garbagecollector"
@@ -151,15 +148,9 @@ func startNodeIpamController(ctx context.Context, controllerContext ControllerCo
 		return nil, false, err
 	}
 
-	var clusterCIDRInformer v1alpha1.ClusterCIDRInformer
-	if utilfeature.DefaultFeatureGate.Enabled(features.MultiCIDRRangeAllocator) {
-		clusterCIDRInformer = controllerContext.InformerFactory.Networking().V1alpha1().ClusterCIDRs()
-	}
-
 	nodeIpamController, err := nodeipamcontroller.NewNodeIpamController(
 		ctx,
 		controllerContext.InformerFactory.Core().V1().Nodes(),
-		clusterCIDRInformer,
 		controllerContext.Cloud,
 		controllerContext.ClientBuilder.ClientOrDie("node-controller"),
 		clusterCIDRs,
@@ -256,12 +247,7 @@ func startPersistentVolumeBinderController(ctx context.Context, controllerContex
 	if err != nil {
 		return nil, true, fmt.Errorf("failed to probe volume plugins when starting persistentvolume controller: %v", err)
 	}
-	filteredDialOptions, err := options.ParseVolumeHostFilters(
-		controllerContext.ComponentConfig.PersistentVolumeBinderController.VolumeHostCIDRDenylist,
-		controllerContext.ComponentConfig.PersistentVolumeBinderController.VolumeHostAllowLocalLoopback)
-	if err != nil {
-		return nil, true, err
-	}
+
 	params := persistentvolumecontroller.ControllerParameters{
 		KubeClient:                controllerContext.ClientBuilder.ClientOrDie("persistent-volume-binder"),
 		SyncPeriod:                controllerContext.ComponentConfig.PersistentVolumeBinderController.PVClaimBinderSyncPeriod.Duration,
@@ -274,7 +260,6 @@ func startPersistentVolumeBinderController(ctx context.Context, controllerContex
 		PodInformer:               controllerContext.InformerFactory.Core().V1().Pods(),
 		NodeInformer:              controllerContext.InformerFactory.Core().V1().Nodes(),
 		EnableDynamicProvisioning: controllerContext.ComponentConfig.PersistentVolumeBinderController.VolumeConfiguration.EnableDynamicProvisioning,
-		FilteredDialOptions:       filteredDialOptions,
 	}
 	volumeController, volumeControllerErr := persistentvolumecontroller.NewController(ctx, params)
 	if volumeControllerErr != nil {
@@ -292,13 +277,6 @@ func startAttachDetachController(ctx context.Context, controllerContext Controll
 	plugins, err := ProbeAttachableVolumePlugins(logger)
 	if err != nil {
 		return nil, true, fmt.Errorf("failed to probe volume plugins when starting attach/detach controller: %v", err)
-	}
-
-	filteredDialOptions, err := options.ParseVolumeHostFilters(
-		controllerContext.ComponentConfig.PersistentVolumeBinderController.VolumeHostCIDRDenylist,
-		controllerContext.ComponentConfig.PersistentVolumeBinderController.VolumeHostAllowLocalLoopback)
-	if err != nil {
-		return nil, true, err
 	}
 
 	ctx = klog.NewContext(ctx, logger)
@@ -319,7 +297,6 @@ func startAttachDetachController(ctx context.Context, controllerContext Controll
 			controllerContext.ComponentConfig.AttachDetachController.DisableAttachDetachReconcilerSync,
 			controllerContext.ComponentConfig.AttachDetachController.ReconcilerSyncLoopPeriod.Duration,
 			attachdetach.DefaultTimerConfig,
-			filteredDialOptions,
 		)
 	if attachDetachControllerErr != nil {
 		return nil, true, fmt.Errorf("failed to start attach/detach controller: %v", attachDetachControllerErr)
@@ -335,12 +312,7 @@ func startVolumeExpandController(ctx context.Context, controllerContext Controll
 		return nil, true, fmt.Errorf("failed to probe volume plugins when starting volume expand controller: %v", err)
 	}
 	csiTranslator := csitrans.New()
-	filteredDialOptions, err := options.ParseVolumeHostFilters(
-		controllerContext.ComponentConfig.PersistentVolumeBinderController.VolumeHostCIDRDenylist,
-		controllerContext.ComponentConfig.PersistentVolumeBinderController.VolumeHostAllowLocalLoopback)
-	if err != nil {
-		return nil, true, err
-	}
+
 	expandController, expandControllerErr := expand.NewExpandController(
 		controllerContext.ClientBuilder.ClientOrDie("expand-controller"),
 		controllerContext.InformerFactory.Core().V1().PersistentVolumeClaims(),
@@ -348,7 +320,6 @@ func startVolumeExpandController(ctx context.Context, controllerContext Controll
 		plugins,
 		csiTranslator,
 		csimigration.NewPluginManager(csiTranslator, utilfeature.DefaultFeatureGate),
-		filteredDialOptions,
 	)
 
 	if expandControllerErr != nil {
@@ -375,8 +346,10 @@ const defaultResourceClaimControllerWorkers = 10
 
 func startResourceClaimController(ctx context.Context, controllerContext ControllerContext) (controller.Interface, bool, error) {
 	ephemeralController, err := resourceclaim.NewController(
+		klog.FromContext(ctx),
 		controllerContext.ClientBuilder.ClientOrDie("resource-claim-controller"),
 		controllerContext.InformerFactory.Core().V1().Pods(),
+		controllerContext.InformerFactory.Resource().V1alpha2().PodSchedulingContexts(),
 		controllerContext.InformerFactory.Resource().V1alpha2().ResourceClaims(),
 		controllerContext.InformerFactory.Resource().V1alpha2().ResourceClaimTemplates())
 	if err != nil {
@@ -399,6 +372,7 @@ func startEndpointController(ctx context.Context, controllerCtx ControllerContex
 
 func startReplicationController(ctx context.Context, controllerContext ControllerContext) (controller.Interface, bool, error) {
 	go replicationcontroller.NewReplicationManager(
+		klog.FromContext(ctx),
 		controllerContext.InformerFactory.Core().V1().Pods(),
 		controllerContext.InformerFactory.Core().V1().ReplicationControllers(),
 		controllerContext.ClientBuilder.ClientOrDie("replication-controller"),

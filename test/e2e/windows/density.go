@@ -40,9 +40,9 @@ import (
 	"github.com/onsi/gomega"
 )
 
-var _ = SIGDescribe("[Feature:Windows] Density [Serial] [Slow]", func() {
+var _ = sigDescribe("[Feature:Windows] Density [Serial] [Slow]", skipUnlessWindows(func() {
 	f := framework.NewDefaultFramework("density-test-windows")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.Context("create a batch of pods", func() {
 		// TODO(coufon): the values are generous, set more precise limits with benchmark data
@@ -72,7 +72,7 @@ var _ = SIGDescribe("[Feature:Windows] Density [Serial] [Slow]", func() {
 		}
 	})
 
-})
+}))
 
 type densityTest struct {
 	// number of pods

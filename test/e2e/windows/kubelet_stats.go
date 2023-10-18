@@ -34,11 +34,12 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
-var _ = SIGDescribe("[Feature:Windows] Kubelet-Stats [Serial]", func() {
+var _ = sigDescribe("[Feature:Windows] Kubelet-Stats [Serial]", skipUnlessWindows(func() {
 	f := framework.NewDefaultFramework("kubelet-stats-test-windows-serial")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.Describe("Kubelet stats collection for Windows nodes", func() {
 
@@ -97,7 +98,7 @@ var _ = SIGDescribe("[Feature:Windows] Kubelet-Stats [Serial]", func() {
 							}
 						}
 					}
-					framework.ExpectEqual(statsChecked, 10, "Should find stats for 10 pods in kubelet stats")
+					gomega.Expect(statsChecked).To(gomega.Equal(10), "Should find stats for 10 pods in kubelet stats")
 
 					time.Sleep(5 * time.Second)
 				}
@@ -112,10 +113,11 @@ var _ = SIGDescribe("[Feature:Windows] Kubelet-Stats [Serial]", func() {
 			})
 		})
 	})
-})
-var _ = SIGDescribe("[Feature:Windows] Kubelet-Stats", func() {
+}))
+
+var _ = sigDescribe("[Feature:Windows] Kubelet-Stats", skipUnlessWindows(func() {
 	f := framework.NewDefaultFramework("kubelet-stats-test-windows")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.Describe("Kubelet stats collection for Windows nodes", func() {
 
@@ -188,7 +190,7 @@ var _ = SIGDescribe("[Feature:Windows] Kubelet-Stats", func() {
 							}
 						}
 					}
-					framework.ExpectEqual(statsChecked, 3, "Should find stats for 10 pods in kubelet stats")
+					gomega.Expect(statsChecked).To(gomega.Equal(3), "Should find stats for 3 pods in kubelet stats")
 
 					time.Sleep(5 * time.Second)
 				}
@@ -203,7 +205,7 @@ var _ = SIGDescribe("[Feature:Windows] Kubelet-Stats", func() {
 			})
 		})
 	})
-})
+}))
 
 // findWindowsNode finds a Windows node that is Ready and Schedulable
 func findWindowsNode(ctx context.Context, f *framework.Framework) (v1.Node, error) {

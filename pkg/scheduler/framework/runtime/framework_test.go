@@ -37,7 +37,7 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	internalqueue "k8s.io/kubernetes/pkg/scheduler/internal/queue"
 	"k8s.io/kubernetes/pkg/scheduler/metrics"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -76,7 +76,7 @@ var cmpOpts = []cmp.Option{
 	}),
 }
 
-func newScoreWithNormalizePlugin1(injArgs runtime.Object, f framework.Handle) (framework.Plugin, error) {
+func newScoreWithNormalizePlugin1(_ context.Context, injArgs runtime.Object, f framework.Handle) (framework.Plugin, error) {
 	var inj injectedResult
 	if err := DecodeInto(injArgs, &inj); err != nil {
 		return nil, err
@@ -84,7 +84,7 @@ func newScoreWithNormalizePlugin1(injArgs runtime.Object, f framework.Handle) (f
 	return &TestScoreWithNormalizePlugin{scoreWithNormalizePlugin1, inj}, nil
 }
 
-func newScoreWithNormalizePlugin2(injArgs runtime.Object, f framework.Handle) (framework.Plugin, error) {
+func newScoreWithNormalizePlugin2(_ context.Context, injArgs runtime.Object, f framework.Handle) (framework.Plugin, error) {
 	var inj injectedResult
 	if err := DecodeInto(injArgs, &inj); err != nil {
 		return nil, err
@@ -92,7 +92,7 @@ func newScoreWithNormalizePlugin2(injArgs runtime.Object, f framework.Handle) (f
 	return &TestScoreWithNormalizePlugin{scoreWithNormalizePlugin2, inj}, nil
 }
 
-func newScorePlugin1(injArgs runtime.Object, f framework.Handle) (framework.Plugin, error) {
+func newScorePlugin1(_ context.Context, injArgs runtime.Object, f framework.Handle) (framework.Plugin, error) {
 	var inj injectedResult
 	if err := DecodeInto(injArgs, &inj); err != nil {
 		return nil, err
@@ -100,7 +100,7 @@ func newScorePlugin1(injArgs runtime.Object, f framework.Handle) (framework.Plug
 	return &TestScorePlugin{scorePlugin1, inj}, nil
 }
 
-func newPluginNotImplementingScore(_ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
+func newPluginNotImplementingScore(_ context.Context, _ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
 	return &PluginNotImplementingScore{}, nil
 }
 
@@ -154,7 +154,7 @@ func (pl *PluginNotImplementingScore) Name() string {
 	return pluginNotImplementingScore
 }
 
-func newTestPlugin(injArgs runtime.Object, f framework.Handle) (framework.Plugin, error) {
+func newTestPlugin(_ context.Context, injArgs runtime.Object, f framework.Handle) (framework.Plugin, error) {
 	return &TestPlugin{name: testPlugin}, nil
 }
 
@@ -296,7 +296,7 @@ func (dp *TestDuplicatePlugin) PreFilterExtensions() framework.PreFilterExtensio
 
 var _ framework.PreFilterPlugin = &TestDuplicatePlugin{}
 
-func newDuplicatePlugin(_ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
+func newDuplicatePlugin(_ context.Context, _ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
 	return &TestDuplicatePlugin{}, nil
 }
 
@@ -326,7 +326,7 @@ func (pl *TestPreEnqueuePlugin) PreEnqueue(ctx context.Context, p *v1.Pod) *fram
 
 var _ framework.QueueSortPlugin = &TestQueueSortPlugin{}
 
-func newQueueSortPlugin(_ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
+func newQueueSortPlugin(_ context.Context, _ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
 	return &TestQueueSortPlugin{}, nil
 }
 
@@ -343,7 +343,7 @@ func (pl *TestQueueSortPlugin) Less(_, _ *framework.QueuedPodInfo) bool {
 
 var _ framework.BindPlugin = &TestBindPlugin{}
 
-func newBindPlugin(_ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
+func newBindPlugin(_ context.Context, _ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
 	return &TestBindPlugin{}, nil
 }
 
@@ -853,165 +853,6 @@ func TestNewFrameworkMultiPointExpansion(t *testing.T) {
 	}
 }
 
-// fakeNoopPlugin doesn't implement interface framework.EnqueueExtensions.
-type fakeNoopPlugin struct{}
-
-func (*fakeNoopPlugin) Name() string { return "fakeNoop" }
-
-func (*fakeNoopPlugin) Filter(_ context.Context, _ *framework.CycleState, _ *v1.Pod, _ *framework.NodeInfo) *framework.Status {
-	return nil
-}
-
-type fakeNodePlugin struct{}
-
-func (*fakeNodePlugin) Name() string { return "fakeNode" }
-
-func (*fakeNodePlugin) Filter(_ context.Context, _ *framework.CycleState, _ *v1.Pod, _ *framework.NodeInfo) *framework.Status {
-	return nil
-}
-
-func (*fakeNodePlugin) EventsToRegister() []framework.ClusterEvent {
-	return []framework.ClusterEvent{
-		{Resource: framework.Pod, ActionType: framework.All},
-		{Resource: framework.Node, ActionType: framework.Delete},
-		{Resource: framework.CSINode, ActionType: framework.Update | framework.Delete},
-	}
-}
-
-type fakePodPlugin struct{}
-
-func (*fakePodPlugin) Name() string { return "fakePod" }
-
-func (*fakePodPlugin) Filter(_ context.Context, _ *framework.CycleState, _ *v1.Pod, _ *framework.NodeInfo) *framework.Status {
-	return nil
-}
-
-func (*fakePodPlugin) EventsToRegister() []framework.ClusterEvent {
-	return []framework.ClusterEvent{
-		{Resource: framework.Pod, ActionType: framework.All},
-		{Resource: framework.Node, ActionType: framework.Add | framework.Delete},
-		{Resource: framework.PersistentVolumeClaim, ActionType: framework.Delete},
-	}
-}
-
-// fakeNoopRuntimePlugin implement interface framework.EnqueueExtensions, but returns nil
-// at runtime. This can simulate a plugin registered at scheduler setup, but does nothing
-// due to some disabled feature gate.
-type fakeNoopRuntimePlugin struct{}
-
-func (*fakeNoopRuntimePlugin) Name() string { return "fakeNoopRuntime" }
-
-func (*fakeNoopRuntimePlugin) Filter(_ context.Context, _ *framework.CycleState, _ *v1.Pod, _ *framework.NodeInfo) *framework.Status {
-	return nil
-}
-
-func (*fakeNoopRuntimePlugin) EventsToRegister() []framework.ClusterEvent { return nil }
-
-func TestNewFrameworkFillEventToPluginMap(t *testing.T) {
-	tests := []struct {
-		name    string
-		plugins []framework.Plugin
-		want    map[framework.ClusterEvent]sets.Set[string]
-	}{
-		{
-			name:    "no-op plugin",
-			plugins: []framework.Plugin{&fakeNoopPlugin{}},
-			want: map[framework.ClusterEvent]sets.Set[string]{
-				{Resource: framework.Pod, ActionType: framework.All}:                   sets.New("fakeNoop", bindPlugin, queueSortPlugin),
-				{Resource: framework.Node, ActionType: framework.All}:                  sets.New("fakeNoop", bindPlugin, queueSortPlugin),
-				{Resource: framework.CSINode, ActionType: framework.All}:               sets.New("fakeNoop", bindPlugin, queueSortPlugin),
-				{Resource: framework.PersistentVolume, ActionType: framework.All}:      sets.New("fakeNoop", bindPlugin, queueSortPlugin),
-				{Resource: framework.PersistentVolumeClaim, ActionType: framework.All}: sets.New("fakeNoop", bindPlugin, queueSortPlugin),
-				{Resource: framework.StorageClass, ActionType: framework.All}:          sets.New("fakeNoop", bindPlugin, queueSortPlugin),
-			},
-		},
-		{
-			name:    "node plugin",
-			plugins: []framework.Plugin{&fakeNodePlugin{}},
-			want: map[framework.ClusterEvent]sets.Set[string]{
-				{Resource: framework.Pod, ActionType: framework.All}:                           sets.New("fakeNode", bindPlugin, queueSortPlugin),
-				{Resource: framework.Node, ActionType: framework.Delete}:                       sets.New("fakeNode"),
-				{Resource: framework.Node, ActionType: framework.All}:                          sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.CSINode, ActionType: framework.Update | framework.Delete}: sets.New("fakeNode"),
-				{Resource: framework.CSINode, ActionType: framework.All}:                       sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.PersistentVolume, ActionType: framework.All}:              sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.PersistentVolumeClaim, ActionType: framework.All}:         sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.StorageClass, ActionType: framework.All}:                  sets.New(bindPlugin, queueSortPlugin),
-			},
-		},
-		{
-			name:    "pod plugin",
-			plugins: []framework.Plugin{&fakePodPlugin{}},
-			want: map[framework.ClusterEvent]sets.Set[string]{
-				{Resource: framework.Pod, ActionType: framework.All}:                      sets.New("fakePod", bindPlugin, queueSortPlugin),
-				{Resource: framework.Node, ActionType: framework.Add | framework.Delete}:  sets.New("fakePod"),
-				{Resource: framework.Node, ActionType: framework.All}:                     sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.PersistentVolumeClaim, ActionType: framework.Delete}: sets.New("fakePod"),
-				{Resource: framework.PersistentVolumeClaim, ActionType: framework.All}:    sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.CSINode, ActionType: framework.All}:                  sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.PersistentVolume, ActionType: framework.All}:         sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.StorageClass, ActionType: framework.All}:             sets.New(bindPlugin, queueSortPlugin),
-			},
-		},
-		{
-			name:    "node and pod plugin",
-			plugins: []framework.Plugin{&fakeNodePlugin{}, &fakePodPlugin{}},
-			want: map[framework.ClusterEvent]sets.Set[string]{
-				{Resource: framework.Node, ActionType: framework.Delete}:                       sets.New("fakeNode"),
-				{Resource: framework.Node, ActionType: framework.Add | framework.Delete}:       sets.New("fakePod"),
-				{Resource: framework.Pod, ActionType: framework.All}:                           sets.New("fakeNode", "fakePod", bindPlugin, queueSortPlugin),
-				{Resource: framework.CSINode, ActionType: framework.Update | framework.Delete}: sets.New("fakeNode"),
-				{Resource: framework.PersistentVolumeClaim, ActionType: framework.Delete}:      sets.New("fakePod"),
-				{Resource: framework.Node, ActionType: framework.All}:                          sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.CSINode, ActionType: framework.All}:                       sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.PersistentVolume, ActionType: framework.All}:              sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.PersistentVolumeClaim, ActionType: framework.All}:         sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.StorageClass, ActionType: framework.All}:                  sets.New(bindPlugin, queueSortPlugin),
-			},
-		},
-		{
-			name:    "no-op runtime plugin",
-			plugins: []framework.Plugin{&fakeNoopRuntimePlugin{}},
-			want: map[framework.ClusterEvent]sets.Set[string]{
-				{Resource: framework.Pod, ActionType: framework.All}:                   sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.Node, ActionType: framework.All}:                  sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.CSINode, ActionType: framework.All}:               sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.PersistentVolume, ActionType: framework.All}:      sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.PersistentVolumeClaim, ActionType: framework.All}: sets.New(bindPlugin, queueSortPlugin),
-				{Resource: framework.StorageClass, ActionType: framework.All}:          sets.New(bindPlugin, queueSortPlugin),
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			registry := Registry{}
-			cfgPls := &config.Plugins{}
-			for _, pl := range tt.plugins {
-				tmpPl := pl
-				if err := registry.Register(pl.Name(), func(_ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
-					return tmpPl, nil
-				}); err != nil {
-					t.Fatalf("fail to register filter plugin (%s)", pl.Name())
-				}
-				cfgPls.Filter.Enabled = append(cfgPls.Filter.Enabled, config.Plugin{Name: pl.Name()})
-			}
-
-			got := make(map[framework.ClusterEvent]sets.Set[string])
-			profile := config.KubeSchedulerProfile{Plugins: cfgPls}
-			_, ctx := ktesting.NewTestContext(t)
-			ctx, cancel := context.WithCancel(ctx)
-			defer cancel()
-			_, err := newFrameworkWithQueueSortAndBind(ctx, registry, profile, WithClusterEventMap(got))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if diff := cmp.Diff(tt.want, got); diff != "" {
-				t.Errorf("Unexpected eventToPlugin map (-want,+got):%s", diff)
-			}
-		})
-	}
-}
-
 func TestPreEnqueuePlugins(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1040,7 +881,7 @@ func TestPreEnqueuePlugins(t *testing.T) {
 				// register all plugins
 				tmpPl := pl
 				if err := registry.Register(pl.Name(),
-					func(_ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
+					func(_ context.Context, _ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
 						return tmpPl, nil
 					}); err != nil {
 					t.Fatalf("fail to register preEnqueue plugin (%s)", pl.Name())
@@ -1111,7 +952,8 @@ func TestRunPreScorePlugins(t *testing.T) {
 					inj:  injectedResult{PreScoreStatus: int(framework.Error)},
 				},
 			},
-			wantStatusCode: framework.Error,
+			wantSkippedPlugins: sets.New("skip"),
+			wantStatusCode:     framework.Error,
 		},
 		{
 			name: "all PreScore plugins returned skip",
@@ -1162,9 +1004,11 @@ func TestRunPreScorePlugins(t *testing.T) {
 			for i, p := range tt.plugins {
 				p := p
 				enabled[i].Name = p.name
-				r.Register(p.name, func(_ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
+				if err := r.Register(p.name, func(_ context.Context, _ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
 					return p, nil
-				})
+				}); err != nil {
+					t.Fatalf("fail to register PreScorePlugins plugin (%s)", p.Name())
+				}
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -1583,11 +1427,11 @@ func TestPreFilterPlugins(t *testing.T) {
 	preFilter2 := &TestPreFilterWithExtensionsPlugin{}
 	r := make(Registry)
 	r.Register(preFilterPluginName,
-		func(_ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
+		func(_ context.Context, _ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
 			return preFilter1, nil
 		})
 	r.Register(preFilterWithExtensionsPluginName,
-		func(_ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
+		func(_ context.Context, _ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
 			return preFilter2, nil
 		})
 	plugins := &config.Plugins{PreFilter: config.PluginSet{Enabled: []config.Plugin{{Name: preFilterWithExtensionsPluginName}, {Name: preFilterPluginName}}}}
@@ -1668,8 +1512,8 @@ func TestRunPreFilterPlugins(t *testing.T) {
 					inj:  injectedResult{PreFilterStatus: int(framework.Error)},
 				},
 			},
-			wantPreFilterResult: nil,
-			wantStatusCode:      framework.Error,
+			wantSkippedPlugins: sets.New("skip"),
+			wantStatusCode:     framework.Error,
 		},
 		{
 			name: "all PreFilter plugins returned skip",
@@ -1721,9 +1565,11 @@ func TestRunPreFilterPlugins(t *testing.T) {
 			for i, p := range tt.plugins {
 				p := p
 				enabled[i].Name = p.name
-				r.Register(p.name, func(_ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
+				if err := r.Register(p.name, func(_ context.Context, _ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
 					return p, nil
-				})
+				}); err != nil {
+					t.Fatalf("fail to register PreFilter plugin (%s)", p.Name())
+				}
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -1809,9 +1655,11 @@ func TestRunPreFilterExtensionRemovePod(t *testing.T) {
 			for i, p := range tt.plugins {
 				p := p
 				enabled[i].Name = p.name
-				r.Register(p.name, func(_ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
+				if err := r.Register(p.name, func(_ context.Context, _ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
 					return p, nil
-				})
+				}); err != nil {
+					t.Fatalf("fail to register PreFilterExtension plugin (%s)", p.Name())
+				}
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -1891,9 +1739,11 @@ func TestRunPreFilterExtensionAddPod(t *testing.T) {
 			for i, p := range tt.plugins {
 				p := p
 				enabled[i].Name = p.name
-				r.Register(p.name, func(_ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
+				if err := r.Register(p.name, func(_ context.Context, _ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
 					return p, nil
-				})
+				}); err != nil {
+					t.Fatalf("fail to register PreFilterExtension plugin (%s)", p.Name())
+				}
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -2092,7 +1942,7 @@ func TestFilterPlugins(t *testing.T) {
 				// register all plugins
 				tmpPl := pl
 				if err := registry.Register(pl.name,
-					func(_ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
+					func(_ context.Context, _ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
 						return tmpPl, nil
 					}); err != nil {
 					t.Fatalf("fail to register filter plugin (%s)", pl.name)
@@ -2216,7 +2066,7 @@ func TestPostFilterPlugins(t *testing.T) {
 				// register all plugins
 				tmpPl := pl
 				if err := registry.Register(pl.name,
-					func(_ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
+					func(_ context.Context, _ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
 						return tmpPl, nil
 					}); err != nil {
 					t.Fatalf("fail to register postFilter plugin (%s)", pl.name)
@@ -2348,7 +2198,7 @@ func TestFilterPluginsWithNominatedPods(t *testing.T) {
 
 			if tt.preFilterPlugin != nil {
 				if err := registry.Register(tt.preFilterPlugin.name,
-					func(_ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
+					func(_ context.Context, _ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
 						return tt.preFilterPlugin, nil
 					}); err != nil {
 					t.Fatalf("fail to register preFilter plugin (%s)", tt.preFilterPlugin.name)
@@ -2360,7 +2210,7 @@ func TestFilterPluginsWithNominatedPods(t *testing.T) {
 			}
 			if tt.filterPlugin != nil {
 				if err := registry.Register(tt.filterPlugin.name,
-					func(_ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
+					func(_ context.Context, _ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
 						return tt.filterPlugin, nil
 					}); err != nil {
 					t.Fatalf("fail to register filter plugin (%s)", tt.filterPlugin.name)
@@ -2524,7 +2374,7 @@ func TestPreBindPlugins(t *testing.T) {
 
 			for _, pl := range tt.plugins {
 				tmpPl := pl
-				if err := registry.Register(pl.name, func(_ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
+				if err := registry.Register(pl.name, func(_ context.Context, _ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
 					return tmpPl, nil
 				}); err != nil {
 					t.Fatalf("Unable to register pre bind plugins: %s", pl.name)
@@ -2581,7 +2431,7 @@ func TestReservePlugins(t *testing.T) {
 					inj:  injectedResult{ReserveStatus: int(framework.Unschedulable)},
 				},
 			},
-			wantStatus: framework.AsStatus(fmt.Errorf(`running Reserve plugin "TestPlugin": %w`, errInjectedStatus)),
+			wantStatus: framework.NewStatus(framework.Unschedulable, injectReason).WithFailedPlugin("TestPlugin"),
 		},
 		{
 			name: "ErrorReservePlugin",
@@ -2601,7 +2451,7 @@ func TestReservePlugins(t *testing.T) {
 					inj:  injectedResult{ReserveStatus: int(framework.UnschedulableAndUnresolvable)},
 				},
 			},
-			wantStatus: framework.AsStatus(fmt.Errorf(`running Reserve plugin "TestPlugin": %w`, errInjectedStatus)),
+			wantStatus: framework.NewStatus(framework.UnschedulableAndUnresolvable, injectReason).WithFailedPlugin("TestPlugin"),
 		},
 		{
 			name: "SuccessSuccessReservePlugins",
@@ -2671,7 +2521,7 @@ func TestReservePlugins(t *testing.T) {
 					inj:  injectedResult{ReserveStatus: int(framework.Success)},
 				},
 			},
-			wantStatus: framework.AsStatus(fmt.Errorf(`running Reserve plugin "TestPlugin": %w`, errInjectedStatus)),
+			wantStatus: framework.NewStatus(framework.Unschedulable, injectReason).WithFailedPlugin("TestPlugin"),
 		},
 	}
 
@@ -2682,7 +2532,7 @@ func TestReservePlugins(t *testing.T) {
 
 			for _, pl := range tt.plugins {
 				tmpPl := pl
-				if err := registry.Register(pl.name, func(_ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
+				if err := registry.Register(pl.name, func(_ context.Context, _ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
 					return tmpPl, nil
 				}); err != nil {
 					t.Fatalf("Unable to register pre bind plugins: %s", pl.name)
@@ -2808,7 +2658,7 @@ func TestPermitPlugins(t *testing.T) {
 
 			for _, pl := range tt.plugins {
 				tmpPl := pl
-				if err := registry.Register(pl.name, func(_ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
+				if err := registry.Register(pl.name, func(_ context.Context, _ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
 					return tmpPl, nil
 				}); err != nil {
 					t.Fatalf("Unable to register Permit plugin: %s", pl.name)
@@ -2828,7 +2678,6 @@ func TestPermitPlugins(t *testing.T) {
 			}
 
 			status := f.RunPermitPlugins(ctx, nil, pod, "")
-
 			if !reflect.DeepEqual(status, tt.want) {
 				t.Errorf("wrong status code. got %v, want %v", status, tt.want)
 			}
@@ -2976,7 +2825,7 @@ func TestRecordingMetrics(t *testing.T) {
 			plugin := &TestPlugin{name: testPlugin, inj: tt.inject}
 			r := make(Registry)
 			r.Register(testPlugin,
-				func(_ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
+				func(_ context.Context, _ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
 					return plugin, nil
 				})
 			pluginSet := config.PluginSet{Enabled: []config.Plugin{{Name: testPlugin, Weight: 1}}}
@@ -2997,7 +2846,7 @@ func TestRecordingMetrics(t *testing.T) {
 
 			recorder := metrics.NewMetricsAsyncRecorder(100, time.Nanosecond, ctx.Done())
 			profile := config.KubeSchedulerProfile{
-				PercentageOfNodesToScore: pointer.Int32(testPercentageOfNodesToScore),
+				PercentageOfNodesToScore: ptr.To[int32](testPercentageOfNodesToScore),
 				SchedulerName:            testProfileName,
 				Plugins:                  plugins,
 			}
@@ -3100,7 +2949,7 @@ func TestRunBindPlugins(t *testing.T) {
 				name := fmt.Sprintf("bind-%d", i)
 				plugin := &TestPlugin{name: name, inj: injectedResult{BindStatus: int(inj)}}
 				r.Register(name,
-					func(_ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
+					func(_ context.Context, _ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
 						return plugin, nil
 					})
 				pluginSet.Enabled = append(pluginSet.Enabled, config.Plugin{Name: name})
@@ -3111,7 +2960,7 @@ func TestRunBindPlugins(t *testing.T) {
 			recorder := metrics.NewMetricsAsyncRecorder(100, time.Nanosecond, ctx.Done())
 			profile := config.KubeSchedulerProfile{
 				SchedulerName:            testProfileName,
-				PercentageOfNodesToScore: pointer.Int32(testPercentageOfNodesToScore),
+				PercentageOfNodesToScore: ptr.To[int32](testPercentageOfNodesToScore),
 				Plugins:                  plugins,
 			}
 			fwk, err := newFrameworkWithQueueSortAndBind(ctx, r, profile, withMetricsRecorder(recorder))
@@ -3159,7 +3008,7 @@ func TestPermitWaitDurationMetric(t *testing.T) {
 			plugin := &TestPlugin{name: testPlugin, inj: tt.inject}
 			r := make(Registry)
 			err := r.Register(testPlugin,
-				func(_ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
+				func(_ context.Context, _ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
 					return plugin, nil
 				})
 			if err != nil {
@@ -3218,7 +3067,7 @@ func TestWaitOnPermit(t *testing.T) {
 			testPermitPlugin := &TestPermitPlugin{}
 			r := make(Registry)
 			r.Register(permitPlugin,
-				func(_ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
+				func(_ context.Context, _ runtime.Object, fh framework.Handle) (framework.Plugin, error) {
 					return testPermitPlugin, nil
 				})
 			plugins := &config.Plugins{

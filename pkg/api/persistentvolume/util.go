@@ -31,13 +31,21 @@ const (
 	deprecatedStorageClassAnnotationsMsg = `deprecated since v1.8; use "storageClassName" attribute instead`
 )
 
-// DropDisabledFields removes disabled fields from the pv spec.
+// DropDisabledSpecFields removes disabled fields from the pv spec.
 // This should be called from PrepareForCreate/PrepareForUpdate for all resources containing a pv spec.
-func DropDisabledFields(pvSpec *api.PersistentVolumeSpec, oldPVSpec *api.PersistentVolumeSpec) {
+func DropDisabledSpecFields(pvSpec *api.PersistentVolumeSpec, oldPVSpec *api.PersistentVolumeSpec) {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.CSINodeExpandSecret) && !hasNodeExpansionSecrets(oldPVSpec) {
 		if pvSpec.CSI != nil {
 			pvSpec.CSI.NodeExpandSecretRef = nil
 		}
+	}
+}
+
+// DropDisabledStatusFields removes disabled fields from the pv status.
+// This should be called from PrepareForUpdate for all resources containing a pv status.
+func DropDisabledStatusFields(oldStatus, newStatus *api.PersistentVolumeStatus) {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.PersistentVolumeLastPhaseTransitionTime) && oldStatus.LastPhaseTransitionTime.IsZero() {
+		newStatus.LastPhaseTransitionTime = nil
 	}
 }
 
@@ -81,20 +89,22 @@ func warningsForPersistentVolumeSpecAndMeta(fieldPath *field.Path, pvSpec *api.P
 	}
 	// If we are on deprecated volume plugin
 	if pvSpec.CephFS != nil {
-		warnings = append(warnings, fmt.Sprintf("%s: deprecated in v1.28, non-functional in v1.31+", fieldPath.Child("spec", "persistentVolumeSource").Child("cephfs")))
+		warnings = append(warnings, fmt.Sprintf("%s: deprecated in v1.28, non-functional in v1.31+", fieldPath.Child("spec", "cephfs")))
 	}
 	if pvSpec.PhotonPersistentDisk != nil {
-		warnings = append(warnings, fmt.Sprintf("%s: deprecated in v1.11, non-functional in v1.16+", fieldPath.Child("spec", "persistentVolumeSource").Child("photonPersistentDisk")))
+		warnings = append(warnings, fmt.Sprintf("%s: deprecated in v1.11, non-functional in v1.16+", fieldPath.Child("spec", "photonPersistentDisk")))
 	}
 	if pvSpec.ScaleIO != nil {
-		warnings = append(warnings, fmt.Sprintf("%s: deprecated in v1.16, non-functional in v1.22+", fieldPath.Child("spec", "persistentVolumeSource").Child("scaleIO")))
+		warnings = append(warnings, fmt.Sprintf("%s: deprecated in v1.16, non-functional in v1.22+", fieldPath.Child("spec", "scaleIO")))
 	}
 	if pvSpec.StorageOS != nil {
-		warnings = append(warnings, fmt.Sprintf("%s: deprecated in v1.22, non-functional in v1.25+", fieldPath.Child("spec", "persistentVolumeSource").Child("storageOS")))
+		warnings = append(warnings, fmt.Sprintf("%s: deprecated in v1.22, non-functional in v1.25+", fieldPath.Child("spec", "storageOS")))
 	}
 	if pvSpec.Glusterfs != nil {
-		warnings = append(warnings, fmt.Sprintf("%s: deprecated in v1.25, non-functional in v1.26+", fieldPath.Child("spec", "persistentVolumeSource").Child("glusterfs")))
+		warnings = append(warnings, fmt.Sprintf("%s: deprecated in v1.25, non-functional in v1.26+", fieldPath.Child("spec", "glusterfs")))
 	}
-
+	if pvSpec.RBD != nil {
+		warnings = append(warnings, fmt.Sprintf("%s: deprecated in v1.28, non-functional in v1.31+", fieldPath.Child("spec", "rbd")))
+	}
 	return warnings
 }

@@ -47,7 +47,6 @@ import (
 	"k8s.io/kubernetes/pkg/controller/volume/common"
 	"k8s.io/kubernetes/pkg/controller/volume/events"
 	"k8s.io/kubernetes/pkg/controller/volume/persistentvolume/metrics"
-	proxyutil "k8s.io/kubernetes/pkg/proxy/util"
 	"k8s.io/kubernetes/pkg/util/goroutinemap"
 	"k8s.io/kubernetes/pkg/util/goroutinemap/exponentialbackoff"
 	vol "k8s.io/kubernetes/pkg/volume"
@@ -240,9 +239,6 @@ type PersistentVolumeController struct {
 
 	translator               CSINameTranslator
 	csiMigratedPluginManager CSIMigratedPluginManager
-
-	// filteredDialOptions configures any dialing done by the controller.
-	filteredDialOptions *proxyutil.FilteredDialOptions
 }
 
 // syncClaim is the main controller method to decide what to do with a claim.
@@ -353,18 +349,16 @@ func (ctrl *PersistentVolumeController) syncUnboundClaim(ctx context.Context, cl
 			// No PV could be found
 			// OBSERVATION: pvc is "Pending", will retry
 
-			if utilfeature.DefaultFeatureGate.Enabled(features.RetroactiveDefaultStorageClass) {
-				logger.V(4).Info("FeatureGate is enabled, attempting to assign storage class to unbound PersistentVolumeClaim", "featureGate", features.RetroactiveDefaultStorageClass, "PVC", klog.KObj(claim))
-				updated, err := ctrl.assignDefaultStorageClass(ctx, claim)
-				if err != nil {
-					metrics.RecordRetroactiveStorageClassMetric(false)
-					return fmt.Errorf("can't update PersistentVolumeClaim[%q]: %w", claimToClaimKey(claim), err)
-				}
-				if updated {
-					logger.V(4).Info("PersistentVolumeClaim update successful, restarting claim sync", "PVC", klog.KObj(claim))
-					metrics.RecordRetroactiveStorageClassMetric(true)
-					return nil
-				}
+			logger.V(4).Info("Attempting to assign storage class to unbound PersistentVolumeClaim", "PVC", klog.KObj(claim))
+			updated, err := ctrl.assignDefaultStorageClass(ctx, claim)
+			if err != nil {
+				metrics.RecordRetroactiveStorageClassMetric(false)
+				return fmt.Errorf("can't update PersistentVolumeClaim[%q]: %w", claimToClaimKey(claim), err)
+			}
+			if updated {
+				logger.V(4).Info("PersistentVolumeClaim update successful, restarting claim sync", "PVC", klog.KObj(claim))
+				metrics.RecordRetroactiveStorageClassMetric(true)
+				return nil
 			}
 
 			switch {
@@ -955,10 +949,7 @@ func (ctrl *PersistentVolumeController) assignDefaultStorageClass(ctx context.Co
 
 	class, err := util.GetDefaultClass(ctrl.classLister)
 	if err != nil {
-		// It is safe to ignore errors here because it means we either could not list SCs or there is more than one default.
-		// TODO: do not ignore errors after this PR is merged: https://github.com/kubernetes/kubernetes/pull/110559
-		logger.V(4).Info("Failed to get default storage class", "err", err)
-		return false, nil
+		return false, err
 	} else if class == nil {
 		logger.V(4).Info("Can not assign storage class to PersistentVolumeClaim: default storage class not found", "PVC", klog.KObj(claim))
 		return false, nil

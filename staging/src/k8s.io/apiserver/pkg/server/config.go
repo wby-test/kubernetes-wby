@@ -78,12 +78,20 @@ import (
 	"k8s.io/component-base/tracing"
 	"k8s.io/klog/v2"
 	openapicommon "k8s.io/kube-openapi/pkg/common"
+	"k8s.io/kube-openapi/pkg/spec3"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 	"k8s.io/utils/clock"
 	utilsnet "k8s.io/utils/net"
 
 	// install apis
 	_ "k8s.io/apiserver/pkg/apis/apiserver/install"
+)
+
+// hostnameFunc is a function to set the hostnameFunc of this apiserver.
+// To be used for testing purpose only, to simulate scenarios where multiple apiservers
+// exist. In such cases we want to ensure unique apiserver IDs which are a hash of hostnameFunc.
+var (
+	hostnameFunc = os.Hostname
 )
 
 const (
@@ -187,7 +195,7 @@ type Config struct {
 	// OpenAPIConfig will be used in generating OpenAPI spec. This is nil by default. Use DefaultOpenAPIConfig for "working" defaults.
 	OpenAPIConfig *openapicommon.Config
 	// OpenAPIV3Config will be used in generating OpenAPI V3 spec. This is nil by default. Use DefaultOpenAPIV3Config for "working" defaults.
-	OpenAPIV3Config *openapicommon.Config
+	OpenAPIV3Config *openapicommon.OpenAPIV3Config
 	// SkipOpenAPIInstallation avoids installing the OpenAPI handler if set to true.
 	SkipOpenAPIInstallation bool
 
@@ -367,7 +375,7 @@ func NewConfig(codecs serializer.CodecFactory) *Config {
 	defaultHealthChecks := []healthz.HealthChecker{healthz.PingHealthz, healthz.LogHealthz}
 	var id string
 	if utilfeature.DefaultFeatureGate.Enabled(genericfeatures.APIServerIdentity) {
-		hostname, err := os.Hostname()
+		hostname, err := hostnameFunc()
 		if err != nil {
 			klog.Fatalf("error getting hostname for apiserver identity: %v", err)
 		}
@@ -475,8 +483,23 @@ func DefaultOpenAPIConfig(getDefinitions openapicommon.GetOpenAPIDefinitions, de
 }
 
 // DefaultOpenAPIV3Config provides the default OpenAPIV3Config used to build the OpenAPI V3 spec
-func DefaultOpenAPIV3Config(getDefinitions openapicommon.GetOpenAPIDefinitions, defNamer *apiopenapi.DefinitionNamer) *openapicommon.Config {
-	defaultConfig := DefaultOpenAPIConfig(getDefinitions, defNamer)
+func DefaultOpenAPIV3Config(getDefinitions openapicommon.GetOpenAPIDefinitions, defNamer *apiopenapi.DefinitionNamer) *openapicommon.OpenAPIV3Config {
+	defaultConfig := &openapicommon.OpenAPIV3Config{
+		IgnorePrefixes: []string{},
+		Info: &spec.Info{
+			InfoProps: spec.InfoProps{
+				Title: "Generic API Server",
+			},
+		},
+		DefaultResponse: &spec3.Response{
+			ResponseProps: spec3.ResponseProps{
+				Description: "Default Response.",
+			},
+		},
+		GetOperationIDAndTags: apiopenapi.GetOperationIDAndTags,
+		GetDefinitionName:     defNamer.GetDefinitionName,
+		GetDefinitions:        getDefinitions,
+	}
 	defaultConfig.Definitions = getDefinitions(func(name string) spec.Ref {
 		defName, _ := defaultConfig.GetDefinitionName(name)
 		return spec.MustCreateRef("#/components/schemas/" + openapicommon.EscapeJsonPointer(defName))
@@ -601,6 +624,45 @@ func completeOpenAPI(config *openapicommon.Config, version *version.Info) {
 	}
 }
 
+func completeOpenAPIV3(config *openapicommon.OpenAPIV3Config, version *version.Info) {
+	if config == nil {
+		return
+	}
+	if config.SecuritySchemes != nil {
+		// Setup OpenAPI security: all APIs will have the same authentication for now.
+		config.DefaultSecurity = []map[string][]string{}
+		keys := []string{}
+		for k := range config.SecuritySchemes {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			config.DefaultSecurity = append(config.DefaultSecurity, map[string][]string{k: {}})
+		}
+		if config.CommonResponses == nil {
+			config.CommonResponses = map[int]*spec3.Response{}
+		}
+		if _, exists := config.CommonResponses[http.StatusUnauthorized]; !exists {
+			config.CommonResponses[http.StatusUnauthorized] = &spec3.Response{
+				ResponseProps: spec3.ResponseProps{
+					Description: "Unauthorized",
+				},
+			}
+		}
+	}
+	// make sure we populate info, and info.version, if not manually set
+	if config.Info == nil {
+		config.Info = &spec.Info{}
+	}
+	if config.Info.Version == "" {
+		if version != nil {
+			config.Info.Version = strings.Split(version.String(), "-")[0]
+		} else {
+			config.Info.Version = "unversioned"
+		}
+	}
+}
+
 // DrainedNotify returns a lifecycle signal of genericapiserver already drained while shutting down.
 func (c *Config) DrainedNotify() <-chan struct{} {
 	return c.lifecycleSignals.InFlightRequestsDrained.Signaled()
@@ -626,7 +688,7 @@ func (c *Config) Complete(informers informers.SharedInformerFactory) CompletedCo
 	}
 
 	completeOpenAPI(c.OpenAPIConfig, c.Version)
-	completeOpenAPI(c.OpenAPIV3Config, c.Version)
+	completeOpenAPIV3(c.OpenAPIV3Config, c.Version)
 
 	if c.DiscoveryAddresses == nil {
 		c.DiscoveryAddresses = discovery.DefaultAddresses{DefaultAddress: c.ExternalAddress}
@@ -897,16 +959,18 @@ func BuildHandlerChainWithStorageVersionPrecondition(apiHandler http.Handler, c 
 }
 
 func DefaultBuildHandlerChain(apiHandler http.Handler, c *Config) http.Handler {
-	handler := filterlatency.TrackCompleted(apiHandler)
+	handler := apiHandler
+
+	handler = filterlatency.TrackCompleted(handler)
 	handler = genericapifilters.WithAuthorization(handler, c.Authorization.Authorizer, c.Serializer)
 	handler = filterlatency.TrackStarted(handler, c.TracerProvider, "authorization")
 
 	if c.FlowControl != nil {
 		workEstimatorCfg := flowcontrolrequest.DefaultWorkEstimatorConfig()
 		requestWorkEstimator := flowcontrolrequest.NewWorkEstimator(
-			c.StorageObjectCountTracker.Get, c.FlowControl.GetInterestedWatchCount, workEstimatorCfg)
+			c.StorageObjectCountTracker.Get, c.FlowControl.GetInterestedWatchCount, workEstimatorCfg, c.FlowControl.GetMaxSeats)
 		handler = filterlatency.TrackCompleted(handler)
-		handler = genericfilters.WithPriorityAndFairness(handler, c.LongRunningFunc, c.FlowControl, requestWorkEstimator)
+		handler = genericfilters.WithPriorityAndFairness(handler, c.LongRunningFunc, c.FlowControl, requestWorkEstimator, c.RequestTimeout/4)
 		handler = filterlatency.TrackStarted(handler, c.TracerProvider, "priorityandfairness")
 	} else {
 		handler = genericfilters.WithMaxInFlightLimit(handler, c.MaxRequestsInFlight, c.MaxMutatingRequestsInFlight, c.LongRunningFunc)
@@ -985,14 +1049,10 @@ func installAPI(s *GenericAPIServer, c *Config) {
 	if c.EnableMetrics {
 		if c.EnableProfiling {
 			routes.MetricsWithReset{}.Install(s.Handler.NonGoRestfulMux)
-			if utilfeature.DefaultFeatureGate.Enabled(features.ComponentSLIs) {
-				slis.SLIMetricsWithReset{}.Install(s.Handler.NonGoRestfulMux)
-			}
+			slis.SLIMetricsWithReset{}.Install(s.Handler.NonGoRestfulMux)
 		} else {
 			routes.DefaultMetrics{}.Install(s.Handler.NonGoRestfulMux)
-			if utilfeature.DefaultFeatureGate.Enabled(features.ComponentSLIs) {
-				slis.SLIMetrics{}.Install(s.Handler.NonGoRestfulMux)
-			}
+			slis.SLIMetrics{}.Install(s.Handler.NonGoRestfulMux)
 		}
 	}
 
@@ -1069,4 +1129,13 @@ func AuthorizeClientBearerToken(loopback *restclient.Config, authn *Authenticati
 
 	tokenAuthenticator := authenticatorfactory.NewFromTokens(tokens, authn.APIAudiences)
 	authn.Authenticator = authenticatorunion.New(tokenAuthenticator, authn.Authenticator)
+}
+
+// For testing purpose only
+func SetHostnameFuncForTests(name string) {
+	hostnameFunc = func() (host string, err error) {
+		host = name
+		err = nil
+		return
+	}
 }

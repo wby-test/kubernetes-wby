@@ -219,7 +219,7 @@
               "type": "string"
             },
             "type": "array",
-            "x-kubernetes-list-type": "set"
+            "x-kubernetes-list-type": "atomic"
           },
           "selectedNode": {
             "description": "SelectedNode is the node for which allocation of ResourceClaims that are referenced by the Pod and that use \"WaitForFirstConsumer\" allocation is to be attempted.",
@@ -414,7 +414,7 @@
               "type": "string"
             },
             "type": "array",
-            "x-kubernetes-list-type": "set"
+            "x-kubernetes-list-type": "atomic"
           }
         },
         "type": "object"
@@ -1061,11 +1061,6 @@
             "group": "extensions",
             "kind": "DeleteOptions",
             "version": "v1beta1"
-          },
-          {
-            "group": "flowcontrol.apiserver.k8s.io",
-            "kind": "DeleteOptions",
-            "version": "v1alpha1"
           },
           {
             "group": "flowcontrol.apiserver.k8s.io",
@@ -1738,11 +1733,6 @@
           {
             "group": "flowcontrol.apiserver.k8s.io",
             "kind": "WatchEvent",
-            "version": "v1alpha1"
-          },
-          {
-            "group": "flowcontrol.apiserver.k8s.io",
-            "kind": "WatchEvent",
             "version": "v1beta1"
           },
           {
@@ -2269,7 +2259,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.resource.v1alpha2.PodSchedulingContext"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -2585,7 +2576,8 @@
                 "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Patch"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -2681,7 +2673,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.resource.v1alpha2.PodSchedulingContext"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -2872,7 +2865,8 @@
                 "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Patch"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -2968,7 +2962,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.resource.v1alpha2.PodSchedulingContext"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -3384,7 +3379,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.resource.v1alpha2.ResourceClaim"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -3700,7 +3696,8 @@
                 "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Patch"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -3796,7 +3793,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.resource.v1alpha2.ResourceClaim"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -3987,7 +3985,8 @@
                 "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Patch"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -4083,7 +4082,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.resource.v1alpha2.ResourceClaim"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -4499,7 +4499,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.resource.v1alpha2.ResourceClaimTemplate"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -4815,7 +4816,8 @@
                 "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Patch"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -4911,7 +4913,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.resource.v1alpha2.ResourceClaimTemplate"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -5770,7 +5773,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.resource.v1alpha2.ResourceClass"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -6076,7 +6080,8 @@
                 "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Patch"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -6172,7 +6177,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.resource.v1alpha2.ResourceClass"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {

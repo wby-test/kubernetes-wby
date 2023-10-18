@@ -251,8 +251,6 @@ func TestListPodResourcesV1(t *testing.T) {
 }
 
 func TestAllocatableResources(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.KubeletPodResourcesGetAllocatable, true)()
-
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 
@@ -707,12 +705,13 @@ func TestGetPodResourcesV1(t *testing.T) {
 			server := NewV1PodResourcesServer(providers)
 			podReq := &podresourcesapi.GetPodResourcesRequest{PodName: podName, PodNamespace: podNamespace}
 			resp, err := server.Get(context.TODO(), podReq)
+
 			if err != nil {
 				if err.Error() != tc.err.Error() {
 					t.Errorf("want exit = %v, got %v", tc.err, err)
 				}
 			} else {
-				if err != err {
+				if err != tc.err {
 					t.Errorf("want exit = %v, got %v", tc.err, err)
 				} else {
 					if !equalGetResponse(tc.expectedResponse, resp) {

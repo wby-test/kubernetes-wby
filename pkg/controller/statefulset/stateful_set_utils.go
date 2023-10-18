@@ -339,8 +339,8 @@ func getPersistentVolumeClaims(set *apps.StatefulSet, pod *v1.Pod) map[string]v1
 	templates := set.Spec.VolumeClaimTemplates
 	claims := make(map[string]v1.PersistentVolumeClaim, len(templates))
 	for i := range templates {
-		claim := templates[i]
-		claim.Name = getPersistentVolumeClaimName(set, &claim, ordinal)
+		claim := templates[i].DeepCopy()
+		claim.Name = getPersistentVolumeClaimName(set, claim, ordinal)
 		claim.Namespace = set.Namespace
 		if claim.Labels != nil {
 			for key, value := range set.Spec.Selector.MatchLabels {
@@ -349,7 +349,7 @@ func getPersistentVolumeClaims(set *apps.StatefulSet, pod *v1.Pod) map[string]v1
 		} else {
 			claim.Labels = set.Spec.Selector.MatchLabels
 		}
-		claims[templates[i].Name] = claim
+		claims[templates[i].Name] = *claim
 	}
 	return claims
 }
@@ -390,12 +390,16 @@ func initIdentity(set *apps.StatefulSet, pod *v1.Pod) {
 // updateIdentity updates pod's name, hostname, and subdomain, and StatefulSetPodNameLabel to conform to set's name
 // and headless service.
 func updateIdentity(set *apps.StatefulSet, pod *v1.Pod) {
-	pod.Name = getPodName(set, getOrdinal(pod))
+	ordinal := getOrdinal(pod)
+	pod.Name = getPodName(set, ordinal)
 	pod.Namespace = set.Namespace
 	if pod.Labels == nil {
 		pod.Labels = make(map[string]string)
 	}
 	pod.Labels[apps.StatefulSetPodNameLabel] = pod.Name
+	if utilfeature.DefaultFeatureGate.Enabled(features.PodIndexLabel) {
+		pod.Labels[apps.PodIndexLabel] = strconv.Itoa(ordinal)
+	}
 }
 
 // isRunningAndReady returns true if pod is in the PodRunning Phase, if it has a condition of PodReady.
@@ -600,6 +604,23 @@ func (ao ascendingOrdinal) Swap(i, j int) {
 
 func (ao ascendingOrdinal) Less(i, j int) bool {
 	return getOrdinal(ao[i]) < getOrdinal(ao[j])
+}
+
+// descendingOrdinal is a sort.Interface that Sorts a list of Pods based on the ordinals extracted
+// from the Pod. Pod's that have not been constructed by StatefulSet's have an ordinal of -1, and are therefore pushed
+// to the end of the list.
+type descendingOrdinal []*v1.Pod
+
+func (do descendingOrdinal) Len() int {
+	return len(do)
+}
+
+func (do descendingOrdinal) Swap(i, j int) {
+	do[i], do[j] = do[j], do[i]
+}
+
+func (do descendingOrdinal) Less(i, j int) bool {
+	return getOrdinal(do[i]) > getOrdinal(do[j])
 }
 
 // getStatefulSetMaxUnavailable calculates the real maxUnavailable number according to the replica count

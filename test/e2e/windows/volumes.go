@@ -44,9 +44,9 @@ var (
 	image = imageutils.GetE2EImage(imageutils.Pause)
 )
 
-var _ = SIGDescribe("[Feature:Windows] Windows volume mounts ", func() {
+var _ = sigDescribe("[Feature:Windows] Windows volume mounts", skipUnlessWindows(func() {
 	f := framework.NewDefaultFramework("windows-volumes")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 	var (
 		emptyDirSource = v1.VolumeSource{
 			EmptyDir: &v1.EmptyDirVolumeSource{
@@ -86,8 +86,7 @@ var _ = SIGDescribe("[Feature:Windows] Windows volume mounts ", func() {
 		})
 
 	})
-
-})
+}))
 
 func doReadOnlyTest(ctx context.Context, f *framework.Framework, source v1.VolumeSource, volumePath string) {
 	var (

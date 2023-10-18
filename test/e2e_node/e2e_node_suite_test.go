@@ -53,6 +53,10 @@ import (
 	e2enodetestingmanifests "k8s.io/kubernetes/test/e2e_node/testing-manifests"
 	system "k8s.io/system-validators/validators"
 
+	// define and freeze constants
+	_ "k8s.io/kubernetes/test/e2e/feature"
+	_ "k8s.io/kubernetes/test/e2e/nodefeature"
+
 	// reconfigure framework
 	_ "k8s.io/kubernetes/test/e2e/framework/debug/init"
 	_ "k8s.io/kubernetes/test/e2e/framework/metrics/init"
@@ -130,6 +134,10 @@ func TestMain(m *testing.M) {
 
 	rand.Seed(time.Now().UnixNano())
 	pflag.Parse()
+	if pflag.CommandLine.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "unknown additional command line arguments: %s", pflag.CommandLine.Args())
+		os.Exit(1)
+	}
 	framework.AfterReadingAllFlags(&framework.TestContext)
 	if err := e2eskipper.InitFeatureGates(utilfeature.DefaultFeatureGate, featureGates); err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: initialize feature gates: %v", err)
@@ -351,7 +359,7 @@ func getNode(c *clientset.Clientset) (*v1.Node, error) {
 	if nodes == nil {
 		return nil, fmt.Errorf("the node list is nil")
 	}
-	framework.ExpectEqual(len(nodes.Items) > 1, false, "the number of nodes is more than 1.")
+	gomega.Expect(len(nodes.Items)).To(gomega.BeNumerically("<=", 1), "the number of nodes is more than 1.")
 	if len(nodes.Items) == 0 {
 		return nil, fmt.Errorf("empty node list: %+v", nodes)
 	}

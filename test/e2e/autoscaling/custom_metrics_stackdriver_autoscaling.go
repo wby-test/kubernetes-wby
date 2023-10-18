@@ -59,7 +59,7 @@ var _ = SIGDescribe("[HPA] [Feature:CustomMetricsAutoscaling] Horizontal pod aut
 	})
 
 	f := framework.NewDefaultFramework("horizontal-pod-autoscaling")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.Describe("with Custom Metric of type Pod from Stackdriver", func() {
 		ginkgo.It("should scale down", func(ctx context.Context) {
@@ -626,7 +626,7 @@ func ensureDesiredReplicasInRange(ctx context.Context, deploymentName, namespace
 		}
 	})
 	// The call above always returns an error, but if it is timeout, it's OK (condition satisfied all the time).
-	if err == wait.ErrWaitTimeout {
+	if wait.Interrupted(err) {
 		framework.Logf("Number of replicas was stable over %v", timeout)
 		return
 	}

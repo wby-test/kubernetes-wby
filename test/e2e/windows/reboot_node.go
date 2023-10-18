@@ -34,13 +34,13 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
-var _ = SIGDescribe("[Feature:Windows] [Excluded:WindowsDocker] [MinimumKubeletVersion:1.22] RebootHost containers [Serial] [Disruptive] [Slow]", func() {
+var _ = sigDescribe("[Feature:Windows] [Excluded:WindowsDocker] [MinimumKubeletVersion:1.22] RebootHost containers [Serial] [Disruptive] [Slow]", skipUnlessWindows(func() {
 	ginkgo.BeforeEach(func() {
 		e2eskipper.SkipUnlessNodeOSDistroIs("windows")
 	})
 
 	f := framework.NewDefaultFramework("reboot-host-test-windows")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.It("should run as a reboot process on the host/node", func(ctx context.Context) {
 
@@ -254,4 +254,4 @@ var _ = SIGDescribe("[Feature:Windows] [Excluded:WindowsDocker] [MinimumKubeletV
 		framework.ExpectNoError(err, "Error retrieving pod")
 		gomega.Expect(p.Status.Phase).To(gomega.Equal(v1.PodSucceeded))
 	})
-})
+}))

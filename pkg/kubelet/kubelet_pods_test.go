@@ -54,10 +54,13 @@ import (
 	containertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
 	"k8s.io/kubernetes/pkg/kubelet/prober/results"
+	"k8s.io/kubernetes/pkg/kubelet/secret"
 	"k8s.io/kubernetes/pkg/kubelet/status"
 	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
 	netutils "k8s.io/utils/net"
 )
+
+var containerRestartPolicyAlways = v1.ContainerRestartPolicyAlways
 
 func TestNodeHostsFileContent(t *testing.T) {
 	testCases := []struct {
@@ -405,6 +408,7 @@ func TestMakeEnvironmentVariables(t *testing.T) {
 	testCases := []struct {
 		name               string                 // the name of the test case
 		ns                 string                 // the namespace to generate environment for
+		enablePodHostIPs   bool                   // enable PodHostIPs feature gate
 		enableServiceLinks *bool                  // enabling service links
 		container          *v1.Container          // the container to use
 		nilLister          bool                   // whether the lister should be nil
@@ -639,6 +643,7 @@ func TestMakeEnvironmentVariables(t *testing.T) {
 		},
 		{
 			name:               "downward api pod",
+			enablePodHostIPs:   true,
 			ns:                 "downward-api",
 			enableServiceLinks: &falseValue,
 			container: &v1.Container{
@@ -706,6 +711,15 @@ func TestMakeEnvironmentVariables(t *testing.T) {
 							},
 						},
 					},
+					{
+						Name: "HOST_IPS",
+						ValueFrom: &v1.EnvVarSource{
+							FieldRef: &v1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  "status.hostIPs",
+							},
+						},
+					},
 				},
 			},
 			podIPs:    []string{"1.2.3.4", "fd00::6"},
@@ -718,10 +732,12 @@ func TestMakeEnvironmentVariables(t *testing.T) {
 				{Name: "POD_IP", Value: "1.2.3.4"},
 				{Name: "POD_IPS", Value: "1.2.3.4,fd00::6"},
 				{Name: "HOST_IP", Value: testKubeletHostIP},
+				{Name: "HOST_IPS", Value: testKubeletHostIP + "," + testKubeletHostIPv6},
 			},
 		},
 		{
 			name:               "downward api pod ips reverse order",
+			enablePodHostIPs:   true,
 			ns:                 "downward-api",
 			enableServiceLinks: &falseValue,
 			container: &v1.Container{
@@ -750,6 +766,15 @@ func TestMakeEnvironmentVariables(t *testing.T) {
 							FieldRef: &v1.ObjectFieldSelector{
 								APIVersion: "v1",
 								FieldPath:  "status.hostIP",
+							},
+						},
+					},
+					{
+						Name: "HOST_IPS",
+						ValueFrom: &v1.EnvVarSource{
+							FieldRef: &v1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  "status.hostIPs",
 							},
 						},
 					},
@@ -761,10 +786,12 @@ func TestMakeEnvironmentVariables(t *testing.T) {
 				{Name: "POD_IP", Value: "1.2.3.4"},
 				{Name: "POD_IPS", Value: "1.2.3.4,fd00::6"},
 				{Name: "HOST_IP", Value: testKubeletHostIP},
+				{Name: "HOST_IPS", Value: testKubeletHostIP + "," + testKubeletHostIPv6},
 			},
 		},
 		{
 			name:               "downward api pod ips multiple ips",
+			enablePodHostIPs:   true,
 			ns:                 "downward-api",
 			enableServiceLinks: &falseValue,
 			container: &v1.Container{
@@ -796,6 +823,15 @@ func TestMakeEnvironmentVariables(t *testing.T) {
 							},
 						},
 					},
+					{
+						Name: "HOST_IPS",
+						ValueFrom: &v1.EnvVarSource{
+							FieldRef: &v1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  "status.hostIPs",
+							},
+						},
+					},
 				},
 			},
 			podIPs:    []string{"1.2.3.4", "192.168.1.1.", "fd00::6"},
@@ -804,6 +840,7 @@ func TestMakeEnvironmentVariables(t *testing.T) {
 				{Name: "POD_IP", Value: "1.2.3.4"},
 				{Name: "POD_IPS", Value: "1.2.3.4,fd00::6"},
 				{Name: "HOST_IP", Value: testKubeletHostIP},
+				{Name: "HOST_IPS", Value: testKubeletHostIP + "," + testKubeletHostIPv6},
 			},
 		},
 		{
@@ -1951,10 +1988,36 @@ func TestMakeEnvironmentVariables(t *testing.T) {
 			},
 			expectedError: true,
 		},
+		{
+			name:               "downward api pod without host ips",
+			enablePodHostIPs:   false,
+			ns:                 "downward-api",
+			enableServiceLinks: &falseValue,
+			container: &v1.Container{
+				Env: []v1.EnvVar{
+					{
+						Name: "HOST_IPS",
+						ValueFrom: &v1.EnvVarSource{
+							FieldRef: &v1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  "status.hostIPs",
+							},
+						},
+					},
+				},
+			},
+			podIPs:    []string{"1.2.3.4", "fd00::6"},
+			nilLister: true,
+			expectedEnvs: []kubecontainer.EnvVar{
+				{Name: "HOST_IPS", Value: ""},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodHostIPs, tc.enablePodHostIPs)()
+
 			fakeRecorder := record.NewFakeRecorder(1)
 			testKubelet := newTestKubelet(t, false /* controllerAttachDetachEnabled */)
 			testKubelet.kubelet.recorder = fakeRecorder
@@ -2077,6 +2140,16 @@ func runningState(cName string) v1.ContainerStatus {
 		State: v1.ContainerState{
 			Running: &v1.ContainerStateRunning{},
 		},
+	}
+}
+func startedState(cName string) v1.ContainerStatus {
+	started := true
+	return v1.ContainerStatus{
+		Name: cName,
+		State: v1.ContainerState{
+			Running: &v1.ContainerStateRunning{},
+		},
+		Started: &started,
 	}
 }
 func runningStateWithStartedAt(cName string, startedAt time.Time) v1.ContainerStatus {
@@ -2383,6 +2456,218 @@ func TestPodPhaseWithRestartAlwaysInitContainers(t *testing.T) {
 	}
 }
 
+func TestPodPhaseWithRestartAlwaysRestartableInitContainers(t *testing.T) {
+	desiredState := v1.PodSpec{
+		NodeName: "machine",
+		InitContainers: []v1.Container{
+			{Name: "containerX", RestartPolicy: &containerRestartPolicyAlways},
+		},
+		Containers: []v1.Container{
+			{Name: "containerA"},
+			{Name: "containerB"},
+		},
+		RestartPolicy: v1.RestartPolicyAlways,
+	}
+
+	tests := []struct {
+		pod           *v1.Pod
+		podIsTerminal bool
+		status        v1.PodPhase
+		test          string
+	}{
+		{&v1.Pod{Spec: desiredState, Status: v1.PodStatus{}}, false, v1.PodPending, "empty, waiting"},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						runningState("containerX"),
+					},
+				},
+			},
+			false,
+			v1.PodPending,
+			"restartable init container running",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						stoppedState("containerX"),
+					},
+				},
+			},
+			false,
+			v1.PodPending,
+			"restartable init container stopped",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						waitingStateWithLastTermination("containerX"),
+					},
+				},
+			},
+			false,
+			v1.PodPending,
+			"restartable init container waiting, terminated zero",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						waitingStateWithNonZeroTermination("containerX"),
+					},
+				},
+			},
+			false,
+			v1.PodPending,
+			"restartable init container waiting, terminated non-zero",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						waitingState("containerX"),
+					},
+				},
+			},
+			false,
+			v1.PodPending,
+			"restartable init container waiting, not terminated",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						startedState("containerX"),
+					},
+					ContainerStatuses: []v1.ContainerStatus{
+						runningState("containerA"),
+					},
+				},
+			},
+			false,
+			v1.PodPending,
+			"restartable init container started, 1/2 regular container running",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						startedState("containerX"),
+					},
+					ContainerStatuses: []v1.ContainerStatus{
+						runningState("containerA"),
+						runningState("containerB"),
+					},
+				},
+			},
+			false,
+			v1.PodRunning,
+			"restartable init container started, all regular containers running",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						runningState("containerX"),
+					},
+					ContainerStatuses: []v1.ContainerStatus{
+						runningState("containerA"),
+						runningState("containerB"),
+					},
+				},
+			},
+			false,
+			v1.PodRunning,
+			"restartable init container running, all regular containers running",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						stoppedState("containerX"),
+					},
+					ContainerStatuses: []v1.ContainerStatus{
+						runningState("containerA"),
+						runningState("containerB"),
+					},
+				},
+			},
+			false,
+			v1.PodRunning,
+			"restartable init container stopped, all regular containers running",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						waitingStateWithLastTermination("containerX"),
+					},
+					ContainerStatuses: []v1.ContainerStatus{
+						runningState("containerA"),
+						runningState("containerB"),
+					},
+				},
+			},
+			false,
+			v1.PodRunning,
+			"backoff crashloop restartable init container, all regular containers running",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						failedState("containerX"),
+					},
+					ContainerStatuses: []v1.ContainerStatus{
+						succeededState("containerA"),
+						succeededState("containerB"),
+					},
+				},
+			},
+			true,
+			v1.PodSucceeded,
+			"all regular containers succeeded and restartable init container failed with restart always, but the pod is terminal",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						succeededState("containerX"),
+					},
+					ContainerStatuses: []v1.ContainerStatus{
+						succeededState("containerA"),
+						succeededState("containerB"),
+					},
+				},
+			},
+			true,
+			v1.PodSucceeded,
+			"all regular containers succeeded and restartable init container succeeded with restart always, but the pod is terminal",
+		},
+	}
+	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SidecarContainers, true)()
+	for _, test := range tests {
+		statusInfo := append(test.pod.Status.InitContainerStatuses[:], test.pod.Status.ContainerStatuses[:]...)
+		status := getPhase(test.pod, statusInfo, test.podIsTerminal)
+		assert.Equal(t, test.status, status, "[test %s]", test.test)
+	}
+}
+
 func TestPodPhaseWithRestartNever(t *testing.T) {
 	desiredState := v1.PodSpec{
 		NodeName: "machine",
@@ -2579,6 +2864,205 @@ func TestPodPhaseWithRestartNeverInitContainers(t *testing.T) {
 			"init container succeeded",
 		},
 	}
+	for _, test := range tests {
+		statusInfo := append(test.pod.Status.InitContainerStatuses[:], test.pod.Status.ContainerStatuses[:]...)
+		status := getPhase(test.pod, statusInfo, false)
+		assert.Equal(t, test.status, status, "[test %s]", test.test)
+	}
+}
+
+func TestPodPhaseWithRestartNeverRestartableInitContainers(t *testing.T) {
+	desiredState := v1.PodSpec{
+		NodeName: "machine",
+		InitContainers: []v1.Container{
+			{Name: "containerX", RestartPolicy: &containerRestartPolicyAlways},
+		},
+		Containers: []v1.Container{
+			{Name: "containerA"},
+			{Name: "containerB"},
+		},
+		RestartPolicy: v1.RestartPolicyNever,
+	}
+
+	tests := []struct {
+		pod    *v1.Pod
+		status v1.PodPhase
+		test   string
+	}{
+		{&v1.Pod{Spec: desiredState, Status: v1.PodStatus{}}, v1.PodPending, "empty, waiting"},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						runningState("containerX"),
+					},
+				},
+			},
+			v1.PodPending,
+			"restartable init container running",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						stoppedState("containerX"),
+					},
+				},
+			},
+			v1.PodPending,
+			"restartable init container stopped",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						waitingStateWithLastTermination("containerX"),
+					},
+				},
+			},
+			v1.PodPending,
+			"restartable init container waiting, terminated zero",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						waitingStateWithNonZeroTermination("containerX"),
+					},
+				},
+			},
+			v1.PodPending,
+			"restartable init container waiting, terminated non-zero",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						waitingState("containerX"),
+					},
+				},
+			},
+			v1.PodPending,
+			"restartable init container waiting, not terminated",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						startedState("containerX"),
+					},
+					ContainerStatuses: []v1.ContainerStatus{
+						runningState("containerA"),
+					},
+				},
+			},
+			v1.PodPending,
+			"restartable init container started, one main container running",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						startedState("containerX"),
+					},
+					ContainerStatuses: []v1.ContainerStatus{
+						succeededState("containerA"),
+						succeededState("containerB"),
+					},
+				},
+			},
+			v1.PodRunning,
+			"restartable init container started, main containers succeeded",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						runningState("containerX"),
+					},
+					ContainerStatuses: []v1.ContainerStatus{
+						succeededState("containerA"),
+						succeededState("containerB"),
+					},
+				},
+			},
+			v1.PodRunning,
+			"restartable init container running, main containers succeeded",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						succeededState("containerX"),
+					},
+					ContainerStatuses: []v1.ContainerStatus{
+						succeededState("containerA"),
+						succeededState("containerB"),
+					},
+				},
+			},
+			v1.PodSucceeded,
+			"all containers succeeded",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						failedState("containerX"),
+					},
+					ContainerStatuses: []v1.ContainerStatus{
+						succeededState("containerA"),
+						succeededState("containerB"),
+					},
+				},
+			},
+			v1.PodSucceeded,
+			"restartable init container terminated non-zero, main containers succeeded",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						waitingStateWithLastTermination("containerX"),
+					},
+					ContainerStatuses: []v1.ContainerStatus{
+						succeededState("containerA"),
+						succeededState("containerB"),
+					},
+				},
+			},
+			v1.PodSucceeded,
+			"backoff crashloop restartable init container, main containers succeeded",
+		},
+		{
+			&v1.Pod{
+				Spec: desiredState,
+				Status: v1.PodStatus{
+					InitContainerStatuses: []v1.ContainerStatus{
+						waitingStateWithNonZeroTermination("containerX"),
+					},
+					ContainerStatuses: []v1.ContainerStatus{
+						succeededState("containerA"),
+						succeededState("containerB"),
+					},
+				},
+			},
+			v1.PodSucceeded,
+			"backoff crashloop with non-zero restartable init container, main containers succeeded",
+		},
+	}
+	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SidecarContainers, true)()
 	for _, test := range tests {
 		statusInfo := append(test.pod.Status.InitContainerStatuses[:], test.pod.Status.ContainerStatuses[:]...)
 		status := getPhase(test.pod, statusInfo, false)
@@ -2820,6 +3304,7 @@ func Test_generateAPIPodStatus(t *testing.T) {
 
 	tests := []struct {
 		name                                       string
+		enablePodHostIPs                           bool // enable PodHostIPs feature gate
 		pod                                        *v1.Pod
 		currentStatus                              *kubecontainer.PodStatus
 		unreadyContainer                           []string
@@ -2882,7 +3367,7 @@ func Test_generateAPIPodStatus(t *testing.T) {
 				LastTransitionTime: normalized_now,
 			},
 			expectedPodReadyToStartContainersCondition: v1.PodCondition{
-				Type:   kubetypes.PodReadyToStartContainers,
+				Type:   v1.PodReadyToStartContainers,
 				Status: v1.ConditionTrue,
 			},
 		},
@@ -2905,9 +3390,11 @@ func Test_generateAPIPodStatus(t *testing.T) {
 					runningState("containerB"),
 				},
 			},
+			enablePodHostIPs: true,
 			expected: v1.PodStatus{
 				Phase:    v1.PodRunning,
 				HostIP:   "127.0.0.1",
+				HostIPs:  []v1.HostIP{{IP: "127.0.0.1"}, {IP: "::1"}},
 				QOSClass: v1.PodQOSBestEffort,
 				Conditions: []v1.PodCondition{
 					{Type: v1.PodInitialized, Status: v1.ConditionTrue},
@@ -2921,7 +3408,7 @@ func Test_generateAPIPodStatus(t *testing.T) {
 				},
 			},
 			expectedPodReadyToStartContainersCondition: v1.PodCondition{
-				Type:   kubetypes.PodReadyToStartContainers,
+				Type:   v1.PodReadyToStartContainers,
 				Status: v1.ConditionTrue,
 			},
 		},
@@ -2943,9 +3430,11 @@ func Test_generateAPIPodStatus(t *testing.T) {
 					runningState("containerB"),
 				},
 			},
+			enablePodHostIPs: true,
 			expected: v1.PodStatus{
 				Phase:    v1.PodRunning,
 				HostIP:   "127.0.0.1",
+				HostIPs:  []v1.HostIP{{IP: "127.0.0.1"}, {IP: "::1"}},
 				QOSClass: v1.PodQOSBestEffort,
 				Conditions: []v1.PodCondition{
 					{Type: v1.PodInitialized, Status: v1.ConditionTrue},
@@ -2959,7 +3448,7 @@ func Test_generateAPIPodStatus(t *testing.T) {
 				},
 			},
 			expectedPodReadyToStartContainersCondition: v1.PodCondition{
-				Type:   kubetypes.PodReadyToStartContainers,
+				Type:   v1.PodReadyToStartContainers,
 				Status: v1.ConditionTrue,
 			},
 		},
@@ -2982,9 +3471,11 @@ func Test_generateAPIPodStatus(t *testing.T) {
 					runningState("containerB"),
 				},
 			},
+			enablePodHostIPs: true,
 			expected: v1.PodStatus{
 				Phase:    v1.PodSucceeded,
 				HostIP:   "127.0.0.1",
+				HostIPs:  []v1.HostIP{{IP: "127.0.0.1"}, {IP: "::1"}},
 				QOSClass: v1.PodQOSBestEffort,
 				Conditions: []v1.PodCondition{
 					{Type: v1.PodInitialized, Status: v1.ConditionTrue, Reason: "PodCompleted"},
@@ -2998,7 +3489,7 @@ func Test_generateAPIPodStatus(t *testing.T) {
 				},
 			},
 			expectedPodReadyToStartContainersCondition: v1.PodCondition{
-				Type:   kubetypes.PodReadyToStartContainers,
+				Type:   v1.PodReadyToStartContainers,
 				Status: v1.ConditionFalse,
 			},
 		},
@@ -3025,9 +3516,11 @@ func Test_generateAPIPodStatus(t *testing.T) {
 				Reason:  "Test",
 				Message: "test",
 			},
+			enablePodHostIPs: true,
 			expected: v1.PodStatus{
 				Phase:    v1.PodSucceeded,
 				HostIP:   "127.0.0.1",
+				HostIPs:  []v1.HostIP{{IP: "127.0.0.1"}, {IP: "::1"}},
 				QOSClass: v1.PodQOSBestEffort,
 				Conditions: []v1.PodCondition{
 					{Type: v1.PodInitialized, Status: v1.ConditionTrue, Reason: "PodCompleted"},
@@ -3043,7 +3536,7 @@ func Test_generateAPIPodStatus(t *testing.T) {
 				Message: "test",
 			},
 			expectedPodReadyToStartContainersCondition: v1.PodCondition{
-				Type:   kubetypes.PodReadyToStartContainers,
+				Type:   v1.PodReadyToStartContainers,
 				Status: v1.ConditionFalse,
 			},
 		},
@@ -3077,9 +3570,11 @@ func Test_generateAPIPodStatus(t *testing.T) {
 				Reason:  "Test",
 				Message: "test",
 			},
+			enablePodHostIPs: true,
 			expected: v1.PodStatus{
 				Phase:    v1.PodSucceeded,
 				HostIP:   "127.0.0.1",
+				HostIPs:  []v1.HostIP{{IP: "127.0.0.1"}, {IP: "::1"}},
 				QOSClass: v1.PodQOSBestEffort,
 				Conditions: []v1.PodCondition{
 					{Type: v1.PodInitialized, Status: v1.ConditionTrue, Reason: "PodCompleted"},
@@ -3095,7 +3590,7 @@ func Test_generateAPIPodStatus(t *testing.T) {
 				Message: "test",
 			},
 			expectedPodReadyToStartContainersCondition: v1.PodCondition{
-				Type:   kubetypes.PodReadyToStartContainers,
+				Type:   v1.PodReadyToStartContainers,
 				Status: v1.ConditionFalse,
 			},
 		},
@@ -3118,9 +3613,11 @@ func Test_generateAPIPodStatus(t *testing.T) {
 					waitingState("containerB"),
 				},
 			},
+			enablePodHostIPs: true,
 			expected: v1.PodStatus{
 				Phase:    v1.PodPending,
 				HostIP:   "127.0.0.1",
+				HostIPs:  []v1.HostIP{{IP: "127.0.0.1"}, {IP: "::1"}},
 				QOSClass: v1.PodQOSBestEffort,
 				Conditions: []v1.PodCondition{
 					{Type: v1.PodInitialized, Status: v1.ConditionTrue},
@@ -3134,7 +3631,7 @@ func Test_generateAPIPodStatus(t *testing.T) {
 				},
 			},
 			expectedPodReadyToStartContainersCondition: v1.PodCondition{
-				Type:   kubetypes.PodReadyToStartContainers,
+				Type:   v1.PodReadyToStartContainers,
 				Status: v1.ConditionTrue,
 			},
 		},
@@ -3170,11 +3667,13 @@ func Test_generateAPIPodStatus(t *testing.T) {
 					runningState("containerB"),
 				},
 			},
+			enablePodHostIPs: true,
 			expected: v1.PodStatus{
 				Phase:    v1.PodPending,
 				Reason:   "Test",
 				Message:  "test",
 				HostIP:   "127.0.0.1",
+				HostIPs:  []v1.HostIP{{IP: "127.0.0.1"}, {IP: "::1"}},
 				QOSClass: v1.PodQOSBestEffort,
 				Conditions: []v1.PodCondition{
 					{Type: v1.PodInitialized, Status: v1.ConditionTrue},
@@ -3188,7 +3687,7 @@ func Test_generateAPIPodStatus(t *testing.T) {
 				},
 			},
 			expectedPodReadyToStartContainersCondition: v1.PodCondition{
-				Type:   kubetypes.PodReadyToStartContainers,
+				Type:   v1.PodReadyToStartContainers,
 				Status: v1.ConditionTrue,
 			},
 		},
@@ -3230,9 +3729,11 @@ func Test_generateAPIPodStatus(t *testing.T) {
 					runningState("containerB"),
 				},
 			},
+			enablePodHostIPs: true,
 			expected: v1.PodStatus{
 				Phase:    v1.PodRunning,
 				HostIP:   "127.0.0.1",
+				HostIPs:  []v1.HostIP{{IP: "127.0.0.1"}, {IP: "::1"}},
 				QOSClass: v1.PodQOSBestEffort,
 				Conditions: []v1.PodCondition{
 					{Type: v1.PodInitialized, Status: v1.ConditionTrue},
@@ -3246,7 +3747,7 @@ func Test_generateAPIPodStatus(t *testing.T) {
 				},
 			},
 			expectedPodReadyToStartContainersCondition: v1.PodCondition{
-				Type:   kubetypes.PodReadyToStartContainers,
+				Type:   v1.PodReadyToStartContainers,
 				Status: v1.ConditionTrue,
 			},
 		},
@@ -3255,6 +3756,7 @@ func Test_generateAPIPodStatus(t *testing.T) {
 		for _, enablePodReadyToStartContainersCondition := range []bool{false, true} {
 			t.Run(test.name, func(t *testing.T) {
 				defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodDisruptionConditions, test.enablePodDisruptionConditions)()
+				defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodHostIPs, test.enablePodHostIPs)()
 				defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodReadyToStartContainersCondition, enablePodReadyToStartContainersCondition)()
 				testKubelet := newTestKubelet(t, false /* controllerAttachDetachEnabled */)
 				defer testKubelet.Cleanup()
@@ -3660,6 +4162,17 @@ func TestNodeAddressUpdatesGenerateAPIPodStatusHostNetworkPodIPs(t *testing.T) {
 			},
 			expectedPodIPs: []v1.PodIP{
 				{IP: "10.0.0.1"},
+				{IP: "2001:db8::2"},
+			},
+		},
+		{
+			name:    "Update secondary after new secondary address dual-stack - reverse order",
+			nodeIPs: []string{"2001:db8::2"},
+			nodeAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "10.0.0.1"},
+				{Type: v1.NodeInternalIP, Address: "2001:db8::2"},
+			},
+			expectedPodIPs: []v1.PodIP{
 				{IP: "2001:db8::2"},
 			},
 		},
@@ -5395,4 +5908,35 @@ func testMetric(t *testing.T, metricName string, expectedMetric string) {
 	if err != nil {
 		t.Error(err)
 	}
+}
+
+func TestGetNonExistentImagePullSecret(t *testing.T) {
+	secrets := make([]*v1.Secret, 0)
+	fakeRecorder := record.NewFakeRecorder(1)
+	testKubelet := newTestKubelet(t, false /* controllerAttachDetachEnabled */)
+	testKubelet.kubelet.recorder = fakeRecorder
+	testKubelet.kubelet.secretManager = secret.NewFakeManagerWithSecrets(secrets)
+	defer testKubelet.Cleanup()
+
+	expectedEvent := "Warning FailedToRetrieveImagePullSecret Unable to retrieve some image pull secrets (secretFoo); attempting to pull the image may not succeed."
+
+	testPod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   "nsFoo",
+			Name:        "podFoo",
+			Annotations: map[string]string{},
+		},
+		Spec: v1.PodSpec{
+			ImagePullSecrets: []v1.LocalObjectReference{
+				{Name: "secretFoo"},
+			},
+		},
+	}
+
+	pullSecrets := testKubelet.kubelet.getPullSecretsForPod(testPod)
+	assert.Equal(t, 0, len(pullSecrets))
+
+	assert.Equal(t, 1, len(fakeRecorder.Events))
+	event := <-fakeRecorder.Events
+	assert.Equal(t, event, expectedEvent)
 }

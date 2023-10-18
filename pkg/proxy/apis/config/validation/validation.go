@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	componentbaseconfig "k8s.io/component-base/config"
+	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/component-base/metrics"
 	apivalidation "k8s.io/kubernetes/pkg/apis/core/validation"
 	kubeproxyconfig "k8s.io/kubernetes/pkg/proxy/apis/config"
@@ -103,6 +104,7 @@ func Validate(config *kubeproxyconfig.KubeProxyConfiguration) field.ErrorList {
 	if config.DetectLocalMode == kubeproxyconfig.LocalModeInterfaceNamePrefix {
 		allErrs = append(allErrs, validateInterface(config.DetectLocal.InterfaceNamePrefix, newPath.Child("InterfacePrefix"))...)
 	}
+	allErrs = append(allErrs, logsapi.Validate(&config.Logging, effectiveFeatures, newPath.Child("logging"))...)
 
 	return allErrs
 }
@@ -161,12 +163,22 @@ func validateKubeProxyConntrackConfiguration(config kubeproxyconfig.KubeProxyCon
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("Min"), config.Min, "must be greater than or equal to 0"))
 	}
 
+	// config.TCPEstablishedTimeout has a default value, so can't be nil.
 	if config.TCPEstablishedTimeout.Duration < 0 {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("TCPEstablishedTimeout"), config.TCPEstablishedTimeout, "must be greater than or equal to 0"))
 	}
 
+	// config.TCPCloseWaitTimeout has a default value, so can't be nil.
 	if config.TCPCloseWaitTimeout.Duration < 0 {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("TCPCloseWaitTimeout"), config.TCPCloseWaitTimeout, "must be greater than or equal to 0"))
+	}
+
+	if config.UDPTimeout.Duration < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("UDPTimeout"), config.UDPTimeout, "must be greater than or equal to 0"))
+	}
+
+	if config.UDPStreamTimeout.Duration < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("UDPStreamTimeout"), config.UDPStreamTimeout, "must be greater than or equal to 0"))
 	}
 
 	return allErrs

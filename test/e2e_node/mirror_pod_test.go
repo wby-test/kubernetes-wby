@@ -45,7 +45,7 @@ import (
 
 var _ = SIGDescribe("MirrorPod", func() {
 	f := framework.NewDefaultFramework("mirror-pod")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 	ginkgo.Context("when create a mirror pod ", func() {
 		var ns, podPath, staticPodName, mirrorPodName string
 		ginkgo.BeforeEach(func(ctx context.Context) {
@@ -89,8 +89,8 @@ var _ = SIGDescribe("MirrorPod", func() {
 			ginkgo.By("check the mirror pod container image is updated")
 			pod, err = f.ClientSet.CoreV1().Pods(ns).Get(ctx, mirrorPodName, metav1.GetOptions{})
 			framework.ExpectNoError(err)
-			framework.ExpectEqual(len(pod.Spec.Containers), 1)
-			framework.ExpectEqual(pod.Spec.Containers[0].Image, image)
+			gomega.Expect(pod.Spec.Containers).To(gomega.HaveLen(1))
+			gomega.Expect(pod.Spec.Containers[0].Image).To(gomega.Equal(image))
 		})
 		/*
 			Release: v1.9
@@ -348,7 +348,7 @@ func createStaticPodUsingNfs(nfsIP string, nodeName string, cmd string, dir stri
 					VolumeSource: v1.VolumeSource{
 						NFS: &v1.NFSVolumeSource{
 							Server:   nfsIP,
-							Path:     "/exports",
+							Path:     "/",
 							ReadOnly: false,
 						},
 					},

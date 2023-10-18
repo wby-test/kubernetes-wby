@@ -92,15 +92,18 @@ type KubectlOptions struct {
 	genericiooptions.IOStreams
 }
 
-var defaultConfigFlags = genericclioptions.NewConfigFlags(true).WithDeprecatedPasswordFlag().WithDiscoveryBurst(300).WithDiscoveryQPS(50.0)
+func defaultConfigFlags() *genericclioptions.ConfigFlags {
+	return genericclioptions.NewConfigFlags(true).WithDeprecatedPasswordFlag().WithDiscoveryBurst(300).WithDiscoveryQPS(50.0)
+}
 
 // NewDefaultKubectlCommand creates the `kubectl` command with default arguments
 func NewDefaultKubectlCommand() *cobra.Command {
+	ioStreams := genericiooptions.IOStreams{In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr}
 	return NewDefaultKubectlCommandWithArgs(KubectlOptions{
 		PluginHandler: NewDefaultPluginHandler(plugin.ValidPluginFilenamePrefixes),
 		Arguments:     os.Args,
-		ConfigFlags:   defaultConfigFlags,
-		IOStreams:     genericiooptions.IOStreams{In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr},
+		ConfigFlags:   defaultConfigFlags().WithWarningPrinter(ioStreams),
+		IOStreams:     ioStreams,
 	})
 }
 
@@ -364,7 +367,7 @@ func NewKubectlCommand(o KubectlOptions) *cobra.Command {
 
 	kubeConfigFlags := o.ConfigFlags
 	if kubeConfigFlags == nil {
-		kubeConfigFlags = defaultConfigFlags
+		kubeConfigFlags = defaultConfigFlags().WithWarningPrinter(o.IOStreams)
 	}
 	kubeConfigFlags.AddFlags(flags)
 	matchVersionKubeConfigFlags := cmdutil.NewMatchVersionFlags(kubeConfigFlags)
@@ -468,6 +471,12 @@ func NewKubectlCommand(o KubectlOptions) *cobra.Command {
 	if !alpha.HasSubCommands() {
 		filters = append(filters, alpha.Name())
 	}
+
+	// Add plugin command group to the list of command groups.
+	// The commands are only injected for the scope of showing help and completion, they are not
+	// invoked directly.
+	pluginCommandGroup := plugin.GetPluginCommandGroup(cmds)
+	groups = append(groups, pluginCommandGroup)
 
 	templates.ActsAsRootCommand(cmds, filters, groups...)
 

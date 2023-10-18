@@ -215,7 +215,6 @@ func describerMap(clientConfig *rest.Config) (map[schema.GroupKind]ResourceDescr
 		{Group: networkingv1beta1.GroupName, Kind: "IngressClass"}:                &IngressClassDescriber{c},
 		{Group: networkingv1.GroupName, Kind: "Ingress"}:                          &IngressDescriber{c},
 		{Group: networkingv1.GroupName, Kind: "IngressClass"}:                     &IngressClassDescriber{c},
-		{Group: networkingv1alpha1.GroupName, Kind: "ClusterCIDR"}:                &ClusterCIDRDescriber{c},
 		{Group: networkingv1alpha1.GroupName, Kind: "IPAddress"}:                  &IPAddressDescriber{c},
 		{Group: batchv1.GroupName, Kind: "Job"}:                                   &JobDescriber{c},
 		{Group: batchv1.GroupName, Kind: "CronJob"}:                               &CronJobDescriber{c},
@@ -871,11 +870,7 @@ func describePod(pod *corev1.Pod, events *corev1.EventList) (string, error) {
 			}
 		}
 		describeVolumes(pod.Spec.Volumes, w, "")
-		if pod.Status.QOSClass != "" {
-			w.Write(LEVEL_0, "QoS Class:\t%s\n", pod.Status.QOSClass)
-		} else {
-			w.Write(LEVEL_0, "QoS Class:\t%s\n", qos.GetPodQOS(pod))
-		}
+		w.Write(LEVEL_0, "QoS Class:\t%s\n", qos.GetPodQOS(pod))
 		printLabelsMultiline(w, "Node-Selectors", pod.Spec.NodeSelector)
 		printPodTolerationsMultiline(w, "Tolerations", pod.Spec.Tolerations)
 		describeTopologySpreadConstraints(pod.Spec.TopologySpreadConstraints, w, "")
@@ -1645,17 +1640,20 @@ func (d *PersistentVolumeClaimDescriber) Describe(namespace, name string, descri
 
 	pc := d.CoreV1().Pods(namespace)
 
-	pods, err := getPodsForPVC(pc, pvc.Name, describerSettings)
+	pods, err := getPodsForPVC(pc, pvc, describerSettings)
 	if err != nil {
 		return "", err
 	}
 
-	events, _ := searchEvents(d.CoreV1(), pvc, describerSettings.ChunkSize)
+	var events *corev1.EventList
+	if describerSettings.ShowEvents {
+		events, _ = searchEvents(d.CoreV1(), pvc, describerSettings.ChunkSize)
+	}
 
 	return describePersistentVolumeClaim(pvc, events, pods)
 }
 
-func getPodsForPVC(c corev1client.PodInterface, pvcName string, settings DescriberSettings) ([]corev1.Pod, error) {
+func getPodsForPVC(c corev1client.PodInterface, pvc *corev1.PersistentVolumeClaim, settings DescriberSettings) ([]corev1.Pod, error) {
 	nsPods, err := getPodsInChunks(c, metav1.ListOptions{Limit: settings.ChunkSize})
 	if err != nil {
 		return []corev1.Pod{}, err
@@ -1665,10 +1663,38 @@ func getPodsForPVC(c corev1client.PodInterface, pvcName string, settings Describ
 
 	for _, pod := range nsPods.Items {
 		for _, volume := range pod.Spec.Volumes {
-			if volume.VolumeSource.PersistentVolumeClaim != nil && volume.VolumeSource.PersistentVolumeClaim.ClaimName == pvcName {
+			if volume.VolumeSource.PersistentVolumeClaim != nil && volume.VolumeSource.PersistentVolumeClaim.ClaimName == pvc.Name {
 				pods = append(pods, pod)
 			}
 		}
+	}
+
+ownersLoop:
+	for _, ownerRef := range pvc.ObjectMeta.OwnerReferences {
+		if ownerRef.Kind != "Pod" {
+			continue
+		}
+
+		podIndex := -1
+		for i, pod := range nsPods.Items {
+			if pod.UID == ownerRef.UID {
+				podIndex = i
+				break
+			}
+		}
+		if podIndex == -1 {
+			// Maybe the pod has been deleted
+			continue
+		}
+
+		for _, pod := range pods {
+			if pod.UID == nsPods.Items[podIndex].UID {
+				// This owner pod is already recorded, look for pods between other owners
+				continue ownersLoop
+			}
+		}
+
+		pods = append(pods, nsPods.Items[podIndex])
 	}
 
 	return pods, nil
@@ -2811,63 +2837,6 @@ func (i *IngressClassDescriber) describeIngressClassV1(ic *networkingv1.IngressC
 			w.Write(LEVEL_1, "Kind:\t%v\n", ic.Spec.Parameters.Kind)
 			w.Write(LEVEL_1, "Name:\t%v\n", ic.Spec.Parameters.Name)
 		}
-		if events != nil {
-			DescribeEvents(events, w)
-		}
-		return nil
-	})
-}
-
-// ClusterCIDRDescriber generates information about a ClusterCIDR.
-type ClusterCIDRDescriber struct {
-	client clientset.Interface
-}
-
-func (c *ClusterCIDRDescriber) Describe(namespace, name string, describerSettings DescriberSettings) (string, error) {
-	var events *corev1.EventList
-
-	ccV1alpha1, err := c.client.NetworkingV1alpha1().ClusterCIDRs().Get(context.TODO(), name, metav1.GetOptions{})
-	if err == nil {
-		if describerSettings.ShowEvents {
-			events, _ = searchEvents(c.client.CoreV1(), ccV1alpha1, describerSettings.ChunkSize)
-		}
-		return c.describeClusterCIDRV1alpha1(ccV1alpha1, events)
-	}
-	return "", err
-}
-
-func (c *ClusterCIDRDescriber) describeClusterCIDRV1alpha1(cc *networkingv1alpha1.ClusterCIDR, events *corev1.EventList) (string, error) {
-	return tabbedString(func(out io.Writer) error {
-		w := NewPrefixWriter(out)
-		w.Write(LEVEL_0, "Name:\t%v\n", cc.Name)
-		printLabelsMultiline(w, "Labels", cc.Labels)
-		printAnnotationsMultiline(w, "Annotations", cc.Annotations)
-
-		w.Write(LEVEL_0, "NodeSelector:\n")
-		if cc.Spec.NodeSelector != nil {
-			w.Write(LEVEL_1, "NodeSelector Terms:")
-			if len(cc.Spec.NodeSelector.NodeSelectorTerms) == 0 {
-				w.WriteLine("<none>")
-			} else {
-				w.WriteLine("")
-				for i, term := range cc.Spec.NodeSelector.NodeSelectorTerms {
-					printNodeSelectorTermsMultilineWithIndent(w, LEVEL_2, fmt.Sprintf("Term %v", i), "\t", term.MatchExpressions)
-				}
-			}
-		}
-
-		if cc.Spec.PerNodeHostBits != 0 {
-			w.Write(LEVEL_0, "PerNodeHostBits:\t%s\n", fmt.Sprint(cc.Spec.PerNodeHostBits))
-		}
-
-		if cc.Spec.IPv4 != "" {
-			w.Write(LEVEL_0, "IPv4:\t%s\n", cc.Spec.IPv4)
-		}
-
-		if cc.Spec.IPv6 != "" {
-			w.Write(LEVEL_0, "IPv6:\t%s\n", cc.Spec.IPv6)
-		}
-
 		if events != nil {
 			DescribeEvents(events, w)
 		}
@@ -5030,8 +4999,12 @@ func (fn typeFunc) Matches(types []reflect.Type) bool {
 // Describe invokes the nested function with the exact number of arguments.
 func (fn typeFunc) Describe(exact interface{}, extra ...interface{}) (string, error) {
 	values := []reflect.Value{reflect.ValueOf(exact)}
-	for _, obj := range extra {
-		values = append(values, reflect.ValueOf(obj))
+	for i, obj := range extra {
+		if obj != nil {
+			values = append(values, reflect.ValueOf(obj))
+		} else {
+			values = append(values, reflect.New(fn.Extra[i]).Elem())
+		}
 	}
 	out := fn.Fn.Call(values)
 	s := out[0].Interface().(string)

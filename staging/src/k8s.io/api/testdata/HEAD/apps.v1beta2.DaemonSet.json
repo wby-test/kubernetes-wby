@@ -452,12 +452,7 @@
                     },
                     "requests": {
                       "requestsKey": "0"
-                    },
-                    "claims": [
-                      {
-                        "name": "nameValue"
-                      }
-                    ]
+                    }
                   },
                   "volumeName": "volumeNameValue",
                   "storageClassName": "storageClassNameValue",
@@ -557,6 +552,7 @@
                 "restartPolicy": "restartPolicyValue"
               }
             ],
+            "restartPolicy": "restartPolicyValue",
             "volumeMounts": [
               {
                 "name": "nameValue",
@@ -694,6 +690,9 @@
                 "tcpSocket": {
                   "port": "portValue",
                   "host": "hostValue"
+                },
+                "sleep": {
+                  "seconds": 1
                 }
               },
               "preStop": {
@@ -717,6 +716,9 @@
                 "tcpSocket": {
                   "port": "portValue",
                   "host": "hostValue"
+                },
+                "sleep": {
+                  "seconds": 1
                 }
               }
             },
@@ -840,6 +842,7 @@
                 "restartPolicy": "restartPolicyValue"
               }
             ],
+            "restartPolicy": "restartPolicyValue",
             "volumeMounts": [
               {
                 "name": "nameValue",
@@ -977,6 +980,9 @@
                 "tcpSocket": {
                   "port": "portValue",
                   "host": "hostValue"
+                },
+                "sleep": {
+                  "seconds": 1
                 }
               },
               "preStop": {
@@ -1000,6 +1006,9 @@
                 "tcpSocket": {
                   "port": "portValue",
                   "host": "hostValue"
+                },
+                "sleep": {
+                  "seconds": 1
                 }
               }
             },
@@ -1123,6 +1132,7 @@
                 "restartPolicy": "restartPolicyValue"
               }
             ],
+            "restartPolicy": "restartPolicyValue",
             "volumeMounts": [
               {
                 "name": "nameValue",
@@ -1260,6 +1270,9 @@
                 "tcpSocket": {
                   "port": "portValue",
                   "host": "hostValue"
+                },
+                "sleep": {
+                  "seconds": 1
                 }
               },
               "preStop": {
@@ -1283,6 +1296,9 @@
                 "tcpSocket": {
                   "port": "portValue",
                   "host": "hostValue"
+                },
+                "sleep": {
+                  "seconds": 1
                 }
               }
             },

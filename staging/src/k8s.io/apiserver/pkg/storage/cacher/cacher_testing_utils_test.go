@@ -17,8 +17,11 @@ limitations under the License.
 package cacher
 
 import (
+	"context"
 	"fmt"
 	"testing"
+
+	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"k8s.io/apimachinery/pkg/api/apitesting"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -58,7 +61,9 @@ func newEtcdTestStorage(t *testing.T, prefix string, pagingEnabled bool) (*etcd3
 		server.V3Client,
 		apitesting.TestCodec(codecs, examplev1.SchemeGroupVersion),
 		newPod,
+		newPodList,
 		prefix,
+		"/pods",
 		schema.GroupResource{Resource: "pods"},
 		identity.NewEncryptCheckTransformer(),
 		pagingEnabled,
@@ -66,13 +71,55 @@ func newEtcdTestStorage(t *testing.T, prefix string, pagingEnabled bool) (*etcd3
 	return server, storage
 }
 
-func makeTestPodWithName(name string) *example.Pod {
-	return &example.Pod{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name},
-		Spec:       storagetesting.DeepEqualSafePodSpec(),
-	}
-}
-
 func computePodKey(obj *example.Pod) string {
 	return fmt.Sprintf("/pods/%s/%s", obj.Namespace, obj.Name)
+}
+
+func compactStorage(c *Cacher, client *clientv3.Client) storagetesting.Compaction {
+	return func(ctx context.Context, t *testing.T, resourceVersion string) {
+		versioner := storage.APIObjectVersioner{}
+		rv, err := versioner.ParseResourceVersion(resourceVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = c.watchCache.waitUntilFreshAndBlock(context.TODO(), rv)
+		if err != nil {
+			t.Fatalf("WatchCache didn't caught up to RV: %v", rv)
+		}
+		c.watchCache.RUnlock()
+
+		c.watchCache.Lock()
+		defer c.watchCache.Unlock()
+		c.Lock()
+		defer c.Unlock()
+
+		if c.watchCache.resourceVersion < rv {
+			t.Fatalf("Can't compact into a future version: %v", resourceVersion)
+		}
+
+		if len(c.watchers.allWatchers) > 0 || len(c.watchers.valueWatchers) > 0 {
+			// We could consider terminating those watchers, but given
+			// watchcache doesn't really support compaction and we don't
+			// exercise it in tests, we just throw an error here.
+			t.Error("Open watchers are not supported during compaction")
+		}
+
+		for c.watchCache.startIndex < c.watchCache.endIndex {
+			index := c.watchCache.startIndex % c.watchCache.capacity
+			if c.watchCache.cache[index].ResourceVersion > rv {
+				break
+			}
+
+			c.watchCache.startIndex++
+		}
+		c.watchCache.listResourceVersion = rv
+
+		if _, err = client.KV.Put(ctx, "compact_rev_key", resourceVersion); err != nil {
+			t.Fatalf("Could not update compact_rev_key: %v", err)
+		}
+		if _, err = client.Compact(ctx, int64(rv)); err != nil {
+			t.Fatalf("Could not compact: %v", err)
+		}
+	}
 }

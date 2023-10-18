@@ -29,9 +29,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"k8s.io/kubelet/pkg/types"
 	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	"k8s.io/kubernetes/pkg/kubelet/cm/cpumanager"
-	"k8s.io/kubernetes/pkg/kubelet/types"
 	admissionapi "k8s.io/pod-security-admission/api"
 	"k8s.io/utils/cpuset"
 
@@ -241,7 +241,7 @@ func runGuPodTest(ctx context.Context, f *framework.Framework, cpuCount int) {
 		cpus, err := cpuset.Parse(strings.TrimSpace(logs))
 		framework.ExpectNoError(err, "parsing cpuset from logs for [%s] of pod [%s]", cnt.Name, pod.Name)
 
-		framework.ExpectEqual(cpus.Size(), cpuCount, "expected cpu set size == %d, got %q", cpuCount, cpus.String())
+		gomega.Expect(cpus.Size()).To(gomega.Equal(cpuCount), "expected cpu set size == %d, got %q", cpuCount, cpus.String())
 	}
 
 	ginkgo.By("by deleting the pods and waiting for container removal")
@@ -754,7 +754,7 @@ func isSMTAlignmentError(pod *v1.Pod) bool {
 // Serial because the test updates kubelet configuration.
 var _ = SIGDescribe("CPU Manager [Serial] [Feature:CPUManager]", func() {
 	f := framework.NewDefaultFramework("cpu-manager-test")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.Context("With kubeconfig updated with static CPU Manager policy run the CPU Manager tests", func() {
 		runCPUManagerTests(f)

@@ -190,9 +190,43 @@ No changes
   - The type `ContainerEventResponse` updated: the field `pod_sandbox_metadata` removed and fields `pod_sandbox_status` and `containers_statuses` added.
   - The type `PodSandboxStatusResponse` has a new fields `containers_statuses` and `timestamp`
 
+### v1.27
 
+`git diff v1.26.0 v1.27.0 -- staging/src/k8s.io/cri-api/pkg/apis/runtime/v1/api.proto`
 
+- [CRI: Add CDI device info for containers](https://github.com/kubernetes/kubernetes/pull/115891/)
+  - New type `CDIDevice` was introduced and added to container config
 
+- [Add mappings for volumes](https://github.com/kubernetes/kubernetes/pull/116377)
+  - Added new fields to the type `Mount` expressing runtime UID/GID mappings for the mount.
+
+### v1.28
+
+`git diff v1.27.0 v1.28.0 -- staging/src/k8s.io/cri-api/pkg/apis/runtime/v1/api.proto`
+
+- [cri-api: fix comment lines about PROPAGATION_PRIVATE](https://github.com/kubernetes/kubernetes/pull/115704)
+  - Fixed comment lines about PROPAGATION_PRIVATE
+
+- [Add user specified image to CRI ContainerConfig](https://github.com/kubernetes/kubernetes/pull/118652)
+  - Added the `user_specified_image` field to type `ImageSpec`
+
+- [kubelet: get cgroup driver config from CRI ](https://github.com/kubernetes/kubernetes/pull/118770)
+  - Added rpc for querying runtime configuration
+  - Added cavieats about cgroup driver field
+
+- [Add swap to stats to Summary API and Prometheus endpoints (/stats/summary and /metrics/resource)](https://github.com/kubernetes/kubernetes/pull/118865)
+  - Added `SwapUsage` type
+  - Added `SwapUsage` field to `ContainerStats` type
+
+- [Expose commit memory used in WindowsMemoryUsage struct](https://github.com/kubernetes/kubernetes/pull/119238)
+  - Added the `commit_memory_bytes` field to type `WindowsMemoryUsage`
+
+### v1.29
+
+`git diff v1.28.0 v1.29.0 -- staging/src/k8s.io/cri-api/pkg/apis/runtime/v1/api.proto`
+
+- [Add runtime handler field to ImageSpec struct](https://github.com/kubernetes/kubernetes/pull/121121)
+  - Added `runtime_handler` field to type `ImageSpec`
 
 ## Community, discussion, contribution, and support
 

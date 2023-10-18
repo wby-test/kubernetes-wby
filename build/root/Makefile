@@ -228,7 +228,7 @@ define TEST_E2E_NODE_HELP_INFO
 #  CONTAINER_RUNTIME_ENDPOINT: remote container endpoint to connect to.
 #    Defaults to "/run/containerd/containerd.sock".
 #  IMAGE_SERVICE_ENDPOINT: remote image endpoint to connect to, to prepull images.
-#    Used when RUNTIME is set to "remote".
+#    Defaults to CONTAINER_RUNTIME_ENDPOINT.
 #  IMAGE_CONFIG_FILE: path to a file containing image configuration.
 #  IMAGE_CONFIG_DIR: path to image config files.
 #  SYSTEM_SPEC_NAME: The name of the system spec to be used for validating the
@@ -257,6 +257,8 @@ define TEST_E2E_NODE_HELP_INFO
 #  SSH_USER: For REMOTE=true only  SSH username to use.
 #  SSH_KEY: For REMOTE=true only. Path to SSH key to use.
 #  SSH_OPTIONS: For REMOTE=true only. SSH options to use.
+#  INSTANCE_TYPE: For REMOTE=true only. Machine type to use.
+#  NODE_ENV: For REMOTE=true only. Additional metadata keys to add the instance.
 #  RUNTIME_CONFIG: The runtime configuration for the API server on the node e2e tests.
 #
 # Example:
@@ -308,16 +310,6 @@ clean:
 	build/make-clean.sh
 	hack/make-rules/clean.sh
 endif
-
-
-# TODO(thockin): Remove this in v1.29.
-.PHONY: generated_files
-generated_files:
-	echo "'make generated_files' is deprecated.  Please use hack/update-codegen.sh instead."
-ifneq ($(PRINT_HELP), y)
-	false
-endif
-
 
 define VET_HELP_INFO
 # Run 'go vet'.

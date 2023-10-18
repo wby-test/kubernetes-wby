@@ -84,6 +84,10 @@ const (
 	// https://github.com/kubernetes/kubernetes/issues/72236
 	kubeIPVSFilterChain utiliptables.Chain = "KUBE-IPVS-FILTER"
 
+	// kubeIPVSOutFilterChain filters access to load balancer services from node.
+	// https://github.com/kubernetes/kubernetes/issues/119656
+	kubeIPVSOutFilterChain utiliptables.Chain = "KUBE-IPVS-OUT-FILTER"
+
 	// defaultScheduler is the default ipvs scheduler algorithm - round robin.
 	defaultScheduler = "rr"
 
@@ -113,6 +117,7 @@ var iptablesJumpChain = []struct {
 	{utiliptables.TableFilter, utiliptables.ChainInput, kubeProxyFirewallChain, "kube-proxy firewall rules"},
 	{utiliptables.TableFilter, utiliptables.ChainForward, kubeProxyFirewallChain, "kube-proxy firewall rules"},
 	{utiliptables.TableFilter, utiliptables.ChainInput, kubeIPVSFilterChain, "kubernetes ipvs access filter"},
+	{utiliptables.TableFilter, utiliptables.ChainOutput, kubeIPVSOutFilterChain, "kubernetes ipvs access filter"},
 }
 
 var iptablesChains = []struct {
@@ -129,6 +134,7 @@ var iptablesChains = []struct {
 	{utiliptables.TableFilter, kubeProxyFirewallChain},
 	{utiliptables.TableFilter, kubeSourceRangesFirewallChain},
 	{utiliptables.TableFilter, kubeIPVSFilterChain},
+	{utiliptables.TableFilter, kubeIPVSOutFilterChain},
 }
 
 var iptablesCleanupChains = []struct {
@@ -144,6 +150,7 @@ var iptablesCleanupChains = []struct {
 	{utiliptables.TableFilter, kubeProxyFirewallChain},
 	{utiliptables.TableFilter, kubeSourceRangesFirewallChain},
 	{utiliptables.TableFilter, kubeIPVSFilterChain},
+	{utiliptables.TableFilter, kubeIPVSOutFilterChain},
 }
 
 // ipsetInfo is all ipset we needed in ipvs proxier
@@ -201,7 +208,6 @@ var ipsetWithIptablesChain = []struct {
 
 // In IPVS proxy mode, the following flags need to be set
 const (
-	sysctlBridgeCallIPTables      = "net/bridge/bridge-nf-call-iptables"
 	sysctlVSConnTrack             = "net/ipv4/vs/conntrack"
 	sysctlConnReuse               = "net/ipv4/vs/conn_reuse_mode"
 	sysctlExpireNoDestConn        = "net/ipv4/vs/expire_nodest_conn"
@@ -220,7 +226,7 @@ type Proxier struct {
 	// services that happened since last syncProxyRules call. For a single object,
 	// changes are accumulated, i.e. previous is state from before all of them,
 	// current is state after applying all of those.
-	endpointsChanges *proxy.EndpointChangeTracker
+	endpointsChanges *proxy.EndpointsChangeTracker
 	serviceChanges   *proxy.ServiceChangeTracker
 
 	mu           sync.Mutex // protects the following fields
@@ -261,7 +267,7 @@ type Proxier struct {
 	recorder       events.EventRecorder
 
 	serviceHealthServer healthcheck.ServiceHealthServer
-	healthzServer       healthcheck.ProxierHealthUpdater
+	healthzServer       *healthcheck.ProxierHealthServer
 
 	ipvsScheduler string
 	// The following buffers are used to reuse memory and avoid allocations
@@ -296,6 +302,11 @@ type Proxier struct {
 	// A Set is used here since we end up calculating endpoint topology multiple times for the same Service
 	// if it has multiple ports but each Service should only be counted once.
 	serviceNoLocalEndpointsExternal sets.Set[string]
+	// lbNoNodeAccessIPPortProtocolEntries represents the set of loadBalancers IP + Port + Protocol that should not be accessible from K8s nodes
+	// We cannot directly restrict LB access from node using LoadBalancerSourceRanges, we need to install
+	// additional iptables rules.
+	// (ref: https://github.com/kubernetes/kubernetes/issues/119656)
+	lbNoNodeAccessIPPortProtocolEntries []*utilipset.Entry
 }
 
 // Proxier implements proxy.Provider
@@ -325,18 +336,11 @@ func NewProxier(ipFamily v1.IPFamily,
 	hostname string,
 	nodeIP net.IP,
 	recorder events.EventRecorder,
-	healthzServer healthcheck.ProxierHealthUpdater,
+	healthzServer *healthcheck.ProxierHealthServer,
 	scheduler string,
 	nodePortAddressStrings []string,
 	kernelHandler KernelHandler,
 ) (*Proxier, error) {
-	// Proxy needs br_netfilter and bridge-nf-call-iptables=1 when containers
-	// are connected to a Linux bridge (but not SDN bridges).  Until most
-	// plugins handle this, log when config is missing
-	if val, err := sysctl.GetSysctl(sysctlBridgeCallIPTables); err == nil && val != 1 {
-		klog.InfoS("Missing br-netfilter module or unset sysctl br-nf-call-iptables, proxy may not work as intended")
-	}
-
 	// Set the conntrack sysctl we need for
 	if err := proxyutil.EnsureSysctl(sysctl, sysctlVSConnTrack, 1); err != nil {
 		return nil, err
@@ -421,7 +425,7 @@ func NewProxier(ipFamily v1.IPFamily,
 		svcPortMap:            make(proxy.ServicePortMap),
 		serviceChanges:        proxy.NewServiceChangeTracker(newServiceInfo, ipFamily, recorder, nil),
 		endpointsMap:          make(proxy.EndpointsMap),
-		endpointsChanges:      proxy.NewEndpointChangeTracker(hostname, nil, ipFamily, recorder, nil),
+		endpointsChanges:      proxy.NewEndpointsChangeTracker(hostname, nil, ipFamily, recorder, nil),
 		initialSync:           true,
 		syncPeriod:            syncPeriod,
 		minSyncPeriod:         minSyncPeriod,
@@ -440,10 +444,10 @@ func NewProxier(ipFamily v1.IPFamily,
 		ipvsScheduler:         scheduler,
 		iptablesData:          bytes.NewBuffer(nil),
 		filterChainsData:      bytes.NewBuffer(nil),
-		natChains:             proxyutil.LineBuffer{},
-		natRules:              proxyutil.LineBuffer{},
-		filterChains:          proxyutil.LineBuffer{},
-		filterRules:           proxyutil.LineBuffer{},
+		natChains:             proxyutil.NewLineBuffer(),
+		natRules:              proxyutil.NewLineBuffer(),
+		filterChains:          proxyutil.NewLineBuffer(),
+		filterRules:           proxyutil.NewLineBuffer(),
 		netlinkHandle:         NewNetLinkHandle(ipFamily == v1.IPv6Protocol),
 		ipset:                 ipset,
 		nodePortAddresses:     nodePortAddresses,
@@ -482,7 +486,7 @@ func NewDualStackProxier(
 	hostname string,
 	nodeIPs map[v1.IPFamily]net.IP,
 	recorder events.EventRecorder,
-	healthzServer healthcheck.ProxierHealthUpdater,
+	healthzServer *healthcheck.ProxierHealthServer,
 	scheduler string,
 	nodePortAddresses []string,
 	kernelHandler KernelHandler,
@@ -756,7 +760,7 @@ func CleanupLeftovers(ipvs utilipvs.Interface, ipt utiliptables.Interface, ipset
 // Sync is called to synchronize the proxier state to iptables and ipvs as soon as possible.
 func (proxier *Proxier) Sync() {
 	if proxier.healthzServer != nil {
-		proxier.healthzServer.QueuedUpdate()
+		proxier.healthzServer.QueuedUpdate(proxier.ipFamily)
 	}
 	metrics.SyncProxyRulesLastQueuedTimestamp.SetToCurrentTime()
 	proxier.syncRunner.Run()
@@ -766,7 +770,7 @@ func (proxier *Proxier) Sync() {
 func (proxier *Proxier) SyncLoop() {
 	// Update healthz timestamp at beginning in case Sync() never succeeds.
 	if proxier.healthzServer != nil {
-		proxier.healthzServer.Updated()
+		proxier.healthzServer.Updated(proxier.ipFamily)
 	}
 	// synthesize "last change queued" time as the informers are syncing.
 	metrics.SyncProxyRulesLastQueuedTimestamp.SetToCurrentTime()
@@ -902,6 +906,7 @@ func (proxier *Proxier) OnNodeDelete(node *v1.Node) {
 		klog.ErrorS(nil, "Received a watch event for a node that doesn't match the current node", "eventNode", node.Name, "currentNode", proxier.hostname)
 		return
 	}
+
 	proxier.mu.Lock()
 	proxier.nodeLabels = nil
 	proxier.mu.Unlock()
@@ -948,6 +953,9 @@ func (proxier *Proxier) syncProxyRules() {
 
 	proxier.serviceNoLocalEndpointsInternal = sets.New[string]()
 	proxier.serviceNoLocalEndpointsExternal = sets.New[string]()
+
+	proxier.lbNoNodeAccessIPPortProtocolEntries = make([]*utilipset.Entry, 0)
+
 	// Begin install iptables
 
 	// Reset all buffers used later.
@@ -1171,7 +1179,7 @@ func (proxier *Proxier) syncProxyRules() {
 		}
 
 		// Capture load-balancer ingress.
-		for _, ingress := range svcInfo.LoadBalancerIPStrings() {
+		for _, ingress := range svcInfo.LoadBalancerVIPStrings() {
 			// ipset call
 			entry = &utilipset.Entry{
 				IP:       ingress,
@@ -1245,6 +1253,10 @@ func (proxier *Proxier) syncProxyRules() {
 						continue
 					}
 					proxier.ipsetList[kubeLoadBalancerSourceIPSet].activeEntries.Insert(entry.String())
+				} else {
+					// since nodeIP is not covered in any of SourceRange we need to explicitly block the lbIP access from k8s nodes.
+					proxier.lbNoNodeAccessIPPortProtocolEntries = append(proxier.lbNoNodeAccessIPPortProtocolEntries, entry)
+
 				}
 			}
 			// ipvs call
@@ -1481,7 +1493,7 @@ func (proxier *Proxier) syncProxyRules() {
 	proxier.cleanLegacyService(activeIPVSServices, currentIPVSServices)
 
 	if proxier.healthzServer != nil {
-		proxier.healthzServer.Updated()
+		proxier.healthzServer.Updated(proxier.ipFamily)
 	}
 	metrics.SyncProxyRulesLastTimestamp.SetToCurrentTime()
 
@@ -1636,6 +1648,17 @@ func (proxier *Proxier) writeIptablesRules() {
 		"-j", "DROP",
 	)
 
+	// disable LB access from node
+	// for IPVS src and dst both would be lbIP
+	for _, entry := range proxier.lbNoNodeAccessIPPortProtocolEntries {
+		proxier.filterRules.Write(
+			"-A", string(kubeIPVSOutFilterChain),
+			"-s", entry.IP,
+			"-m", "ipvs", "--vaddr", entry.IP, "--vproto", entry.Protocol, "--vport", strconv.Itoa(entry.Port),
+			"-j", "DROP",
+		)
+	}
+
 	// Accept all traffic with destination of ipvs virtual service, in case other iptables rules
 	// block the traffic, that may result in ipvs rules invalid.
 	// Those rules must be in the end of KUBE-SERVICE chain
@@ -1691,11 +1714,6 @@ func (proxier *Proxier) writeIptablesRules() {
 	// Install the kubernetes-specific postrouting rules. We use a whole chain for
 	// this so that it is easier to flush and change, for example if the mark
 	// value should ever change.
-
-	// NOTE: kubelet creates identical copies of these rules. If you want to change
-	// these rules in the future, you MUST do so in a way that will interoperate
-	// correctly with skewed versions of the rules created by kubelet. (Remove this
-	// comment once IPTablesOwnershipCleanup is GA.)
 
 	proxier.natRules.Write(
 		"-A", string(kubePostroutingChain),

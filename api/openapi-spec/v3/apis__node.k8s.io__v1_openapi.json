@@ -511,11 +511,6 @@
           {
             "group": "flowcontrol.apiserver.k8s.io",
             "kind": "DeleteOptions",
-            "version": "v1alpha1"
-          },
-          {
-            "group": "flowcontrol.apiserver.k8s.io",
-            "kind": "DeleteOptions",
             "version": "v1beta1"
           },
           {
@@ -1184,11 +1179,6 @@
           {
             "group": "flowcontrol.apiserver.k8s.io",
             "kind": "WatchEvent",
-            "version": "v1alpha1"
-          },
-          {
-            "group": "flowcontrol.apiserver.k8s.io",
-            "kind": "WatchEvent",
             "version": "v1beta1"
           },
           {
@@ -1705,7 +1695,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.node.v1.RuntimeClass"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -2011,7 +2002,8 @@
                 "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Patch"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -2107,7 +2099,8 @@
                 "$ref": "#/components/schemas/io.k8s.api.node.v1.RuntimeClass"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {

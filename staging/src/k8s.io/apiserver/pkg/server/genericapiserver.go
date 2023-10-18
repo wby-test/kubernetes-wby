@@ -158,7 +158,7 @@ type GenericAPIServer struct {
 	openAPIConfig *openapicommon.Config
 
 	// Enable swagger and/or OpenAPI V3 if these configs are non-nil.
-	openAPIV3Config *openapicommon.Config
+	openAPIV3Config *openapicommon.OpenAPIV3Config
 
 	// SkipOpenAPIInstallation indicates not to install the OpenAPI handler
 	// during PrepareRun.
@@ -432,7 +432,7 @@ func (s *GenericAPIServer) PrepareRun() preparedGenericAPIServer {
 	if s.openAPIV3Config != nil && !s.skipOpenAPIInstallation {
 		if utilfeature.DefaultFeatureGate.Enabled(features.OpenAPIV3) {
 			s.OpenAPIV3VersionedService = routes.OpenAPI{
-				Config: s.openAPIV3Config,
+				V3Config: s.openAPIV3Config,
 			}.InstallV3(s.Handler.GoRestfulContainer, s.Handler.NonGoRestfulMux)
 		}
 	}
@@ -911,9 +911,22 @@ func (s *GenericAPIServer) getAPIGroupVersion(apiGroupInfo *APIGroupInfo, groupV
 }
 
 func (s *GenericAPIServer) newAPIGroupVersion(apiGroupInfo *APIGroupInfo, groupVersion schema.GroupVersion) *genericapi.APIGroupVersion {
+
+	allServedVersionsByResource := map[string][]string{}
+	for version, resourcesInVersion := range apiGroupInfo.VersionedResourcesStorageMap {
+		for resource := range resourcesInVersion {
+			if len(groupVersion.Group) == 0 {
+				allServedVersionsByResource[resource] = append(allServedVersionsByResource[resource], version)
+			} else {
+				allServedVersionsByResource[resource] = append(allServedVersionsByResource[resource], fmt.Sprintf("%s/%s", groupVersion.Group, version))
+			}
+		}
+	}
+
 	return &genericapi.APIGroupVersion{
-		GroupVersion:     groupVersion,
-		MetaGroupVersion: apiGroupInfo.MetaGroupVersion,
+		GroupVersion:                groupVersion,
+		AllServedVersionsByResource: allServedVersionsByResource,
+		MetaGroupVersion:            apiGroupInfo.MetaGroupVersion,
 
 		ParameterCodec:        apiGroupInfo.ParameterCodec,
 		Serializer:            apiGroupInfo.NegotiatedSerializer,

@@ -34,7 +34,7 @@ const (
 	PublicKeysECDSA = "PublicKeysECDSA"
 	// RootlessControlPlane is expected to be in alpha in v1.22
 	RootlessControlPlane = "RootlessControlPlane"
-	// EtcdLearnerMode is expected to be in alpha in v1.27
+	// EtcdLearnerMode is expected to be in alpha in v1.27, beta in v1.29
 	EtcdLearnerMode = "EtcdLearnerMode"
 	// UpgradeAddonsBeforeControlPlane is expected to be in deprecated in v1.28 and will be removed in future release
 	UpgradeAddonsBeforeControlPlane = "UpgradeAddonsBeforeControlPlane"
@@ -42,9 +42,12 @@ const (
 
 // InitFeatureGates are the default feature gates for the init command
 var InitFeatureGates = FeatureList{
-	PublicKeysECDSA:      {FeatureSpec: featuregate.FeatureSpec{Default: false, PreRelease: featuregate.Alpha}},
+	PublicKeysECDSA: {
+		FeatureSpec:        featuregate.FeatureSpec{Default: false, PreRelease: featuregate.Deprecated},
+		DeprecationMessage: "The PublicKeysECDSA feature gate is deprecated and will be removed after the feature 'ClusterConfiguration.EncryptionAlgorithm' is added.",
+	},
 	RootlessControlPlane: {FeatureSpec: featuregate.FeatureSpec{Default: false, PreRelease: featuregate.Alpha}},
-	EtcdLearnerMode:      {FeatureSpec: featuregate.FeatureSpec{Default: false, PreRelease: featuregate.Alpha}},
+	EtcdLearnerMode:      {FeatureSpec: featuregate.FeatureSpec{Default: true, PreRelease: featuregate.Beta}},
 	UpgradeAddonsBeforeControlPlane: {
 		FeatureSpec:        featuregate.FeatureSpec{Default: false, PreRelease: featuregate.Deprecated},
 		DeprecationMessage: "The UpgradeAddonsBeforeControlPlane feature gate is deprecated and will be removed in a future release.",
@@ -102,15 +105,6 @@ func Supports(featureList FeatureList, featureName string) bool {
 	return false
 }
 
-// Keys returns a slice of feature names for a given feature set
-func Keys(featureList FeatureList) []string {
-	var list []string
-	for k := range featureList {
-		list = append(list, k)
-	}
-	return list
-}
-
 // KnownFeatures returns a slice of strings describing the FeatureList features.
 func KnownFeatures(f *FeatureList) []string {
 	var known []string
@@ -152,7 +146,7 @@ func NewFeatureGate(f *FeatureList, value string) (map[string]bool, error) {
 		}
 
 		if featureSpec.PreRelease == featuregate.Deprecated {
-			klog.Warningf("Setting deprecated feature gate %s=%t. It will be removed in a future release.", k, v)
+			klog.Warningf("Setting deprecated feature gate %s=%s. It will be removed in a future release.", k, v)
 		}
 
 		boolValue, err := strconv.ParseBool(v)

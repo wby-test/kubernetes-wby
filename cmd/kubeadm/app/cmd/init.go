@@ -63,6 +63,7 @@ type initOptions struct {
 	uploadCerts             bool
 	skipCertificateKeyPrint bool
 	patchesDir              string
+	skipCRIDetect           bool
 }
 
 // compile-time assert that the local data object satisfies the phases data interface.
@@ -150,9 +151,9 @@ func newCmdInit(out io.Writer, initOptions *initOptions) *cobra.Command {
 	// both when running the entire workflow or single phases
 	initRunner.SetDataInitializer(func(cmd *cobra.Command, args []string) (workflow.RunData, error) {
 		if cmd.Flags().Lookup(options.NodeCRISocket) == nil {
-			// avoid CRI detection
+			// skip CRI detection
 			// assume that the command execution does not depend on CRISocket when --cri-socket flag is not set
-			initOptions.externalInitCfg.NodeRegistration.CRISocket = kubeadmconstants.UnknownCRISocket
+			initOptions.skipCRIDetect = true
 		}
 		data, err := newInitData(cmd, args, initOptions, out)
 		if err != nil {
@@ -188,7 +189,7 @@ func AddInitConfigFlags(flagSet *flag.FlagSet, cfg *kubeadmapiv1.InitConfigurati
 	)
 	flagSet.StringVar(
 		&cfg.CertificateKey, options.CertificateKey, "",
-		"Key used to encrypt the control-plane certificates in the kubeadm-certs Secret.",
+		"Key used to encrypt the control-plane certificates in the kubeadm-certs Secret. The certificate key is a hex encoded string that is an AES key of size 32 bytes.",
 	)
 	cmdutil.AddCRISocketFlag(flagSet, &cfg.NodeRegistration.CRISocket)
 }
@@ -279,15 +280,15 @@ func newInitOptions() *initOptions {
 // newInitData returns a new initData struct to be used for the execution of the kubeadm init workflow.
 // This func takes care of validating initOptions passed to the command, and then it converts
 // options into the internal InitConfiguration type that is used as input all the phases in the kubeadm init workflow
-func newInitData(cmd *cobra.Command, args []string, options *initOptions, out io.Writer) (*initData, error) {
+func newInitData(cmd *cobra.Command, args []string, initOptions *initOptions, out io.Writer) (*initData, error) {
 	// Re-apply defaults to the public kubeadm API (this will set only values not exposed/not set as a flags)
-	kubeadmscheme.Scheme.Default(options.externalInitCfg)
-	kubeadmscheme.Scheme.Default(options.externalClusterCfg)
+	kubeadmscheme.Scheme.Default(initOptions.externalInitCfg)
+	kubeadmscheme.Scheme.Default(initOptions.externalClusterCfg)
 
 	// Validate standalone flags values and/or combination of flags and then assigns
 	// validated values to the public kubeadm config API when applicable
 	var err error
-	if options.externalClusterCfg.FeatureGates, err = features.NewFeatureGate(&features.InitFeatureGates, options.featureGatesString); err != nil {
+	if initOptions.externalClusterCfg.FeatureGates, err = features.NewFeatureGate(&features.InitFeatureGates, initOptions.featureGatesString); err != nil {
 		return nil, err
 	}
 
@@ -295,18 +296,20 @@ func newInitData(cmd *cobra.Command, args []string, options *initOptions, out io
 		return nil, err
 	}
 
-	if err = options.bto.ApplyTo(options.externalInitCfg); err != nil {
+	if err = initOptions.bto.ApplyTo(initOptions.externalInitCfg); err != nil {
 		return nil, err
 	}
 
 	// Either use the config file if specified, or convert public kubeadm API to the internal InitConfiguration
 	// and validates InitConfiguration
-	cfg, err := configutil.LoadOrDefaultInitConfiguration(options.cfgPath, options.externalInitCfg, options.externalClusterCfg)
+	cfg, err := configutil.LoadOrDefaultInitConfiguration(initOptions.cfgPath, initOptions.externalInitCfg, initOptions.externalClusterCfg, configutil.LoadOrDefaultConfigurationOptions{
+		SkipCRIDetect: initOptions.skipCRIDetect,
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	ignorePreflightErrorsSet, err := validation.ValidateIgnorePreflightErrors(options.ignorePreflightErrors, cfg.NodeRegistration.IgnorePreflightErrors)
+	ignorePreflightErrorsSet, err := validation.ValidateIgnorePreflightErrors(initOptions.ignorePreflightErrors, cfg.NodeRegistration.IgnorePreflightErrors)
 	if err != nil {
 		return nil, err
 	}
@@ -314,8 +317,8 @@ func newInitData(cmd *cobra.Command, args []string, options *initOptions, out io
 	cfg.NodeRegistration.IgnorePreflightErrors = sets.List(ignorePreflightErrorsSet)
 
 	// override node name from the command line option
-	if options.externalInitCfg.NodeRegistration.Name != "" {
-		cfg.NodeRegistration.Name = options.externalInitCfg.NodeRegistration.Name
+	if initOptions.externalInitCfg.NodeRegistration.Name != "" {
+		cfg.NodeRegistration.Name = initOptions.externalInitCfg.NodeRegistration.Name
 	}
 
 	if err := configutil.VerifyAPIServerBindAddress(cfg.LocalAPIEndpoint.AdvertiseAddress); err != nil {
@@ -327,7 +330,7 @@ func newInitData(cmd *cobra.Command, args []string, options *initOptions, out io
 
 	// if dry running creates a temporary folder for saving kubeadm generated files
 	dryRunDir := ""
-	if options.dryRun {
+	if initOptions.dryRun || cfg.DryRun {
 		// the KUBEADM_INIT_DRYRUN_DIR environment variable allows overriding the dry-run temporary
 		// directory from the command line. This makes it possible to run "kubeadm init" integration
 		// tests without root.
@@ -347,7 +350,7 @@ func newInitData(cmd *cobra.Command, args []string, options *initOptions, out io
 
 		// Validate that also the required kubeconfig files exists and are invalid, because
 		// kubeadm can't regenerate them without the CA Key
-		kubeconfigDir := options.kubeconfigDir
+		kubeconfigDir := initOptions.kubeconfigDir
 		if err := kubeconfigphase.ValidateKubeconfigsForExternalCA(kubeconfigDir, cfg); err != nil {
 			return nil, err
 		}
@@ -363,24 +366,24 @@ func newInitData(cmd *cobra.Command, args []string, options *initOptions, out io
 		}
 	}
 
-	if options.uploadCerts && (externalCA || externalFrontProxyCA) {
+	if initOptions.uploadCerts && (externalCA || externalFrontProxyCA) {
 		return nil, errors.New("can't use upload-certs with an external CA or an external front-proxy CA")
 	}
 
 	return &initData{
 		cfg:                     cfg,
 		certificatesDir:         cfg.CertificatesDir,
-		skipTokenPrint:          options.skipTokenPrint,
-		dryRun:                  options.dryRun,
+		skipTokenPrint:          initOptions.skipTokenPrint,
+		dryRun:                  cmdutil.ValueFromFlagsOrConfig(cmd.Flags(), options.DryRun, cfg.DryRun, initOptions.dryRun).(bool),
 		dryRunDir:               dryRunDir,
-		kubeconfigDir:           options.kubeconfigDir,
-		kubeconfigPath:          options.kubeconfigPath,
+		kubeconfigDir:           initOptions.kubeconfigDir,
+		kubeconfigPath:          initOptions.kubeconfigPath,
 		ignorePreflightErrors:   ignorePreflightErrorsSet,
 		externalCA:              externalCA,
 		outputWriter:            out,
-		uploadCerts:             options.uploadCerts,
-		skipCertificateKeyPrint: options.skipCertificateKeyPrint,
-		patchesDir:              options.patchesDir,
+		uploadCerts:             initOptions.uploadCerts,
+		skipCertificateKeyPrint: initOptions.skipCertificateKeyPrint,
+		patchesDir:              initOptions.patchesDir,
 	}, nil
 }
 

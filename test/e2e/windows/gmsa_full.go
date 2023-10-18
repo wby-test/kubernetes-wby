@@ -90,9 +90,9 @@ const (
 	gmsaSharedFolder = "write_test"
 )
 
-var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
+var _ = sigDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", skipUnlessWindows(func() {
 	f := framework.NewDefaultFramework("gmsa-full-test-windows")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.Describe("GMSA support", func() {
 		ginkgo.It("works end to end", func(ctx context.Context) {
@@ -220,7 +220,7 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 
 		})
 	})
-})
+}))
 
 func isValidOutput(output string) bool {
 	return strings.Contains(output, expectedQueryOutput) &&

@@ -52,10 +52,10 @@ const (
 // before test running so that the image pulling won't fail in actual test.
 var NodePrePullImageList = sets.NewString(
 	imageutils.GetE2EImage(imageutils.Agnhost),
-	"gcr.io/cadvisor/cadvisor:v0.43.0",
+	"gcr.io/cadvisor/cadvisor:v0.47.2",
 	"registry.k8s.io/stress:v1",
 	busyboxImage,
-	"registry.k8s.io/busybox@sha256:4bdd623e848417d96127e16037743f0cd8b528c026e9175e22a84f639eca58ff",
+	"registry.k8s.io/e2e-test-images/busybox@sha256:a9155b13325b2abef48e71de77bb8ac015412a566829f621d06bfae5c699b1b9",
 	imageutils.GetE2EImage(imageutils.Nginx),
 	imageutils.GetE2EImage(imageutils.Perl),
 	imageutils.GetE2EImage(imageutils.Nonewprivs),
@@ -106,7 +106,7 @@ func isRunningOnArm64() bool {
 }
 
 func getNodeProblemDetectorImage() string {
-	const defaultImage string = "registry.k8s.io/node-problem-detector/node-problem-detector:v0.8.7"
+	const defaultImage string = "registry.k8s.io/node-problem-detector/node-problem-detector:v0.8.13"
 	image := os.Getenv("NODE_PROBLEM_DETECTOR_IMAGE")
 	if image == "" {
 		image = defaultImage

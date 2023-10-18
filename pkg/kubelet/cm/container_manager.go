@@ -146,25 +146,25 @@ type NodeConfig struct {
 	KubeletRootDir        string
 	ProtectKernelDefaults bool
 	NodeAllocatableConfig
-	QOSReserved                              map[v1.ResourceName]int64
-	CPUManagerPolicy                         string
-	CPUManagerPolicyOptions                  map[string]string
-	TopologyManagerScope                     string
-	CPUManagerReconcilePeriod                time.Duration
-	ExperimentalMemoryManagerPolicy          string
-	ExperimentalMemoryManagerReservedMemory  []kubeletconfig.MemoryReservation
-	PodPidsLimit                             int64
-	EnforceCPULimits                         bool
-	CPUCFSQuotaPeriod                        time.Duration
-	TopologyManagerPolicy                    string
-	ExperimentalTopologyManagerPolicyOptions map[string]string
+	QOSReserved                             map[v1.ResourceName]int64
+	CPUManagerPolicy                        string
+	CPUManagerPolicyOptions                 map[string]string
+	TopologyManagerScope                    string
+	CPUManagerReconcilePeriod               time.Duration
+	ExperimentalMemoryManagerPolicy         string
+	ExperimentalMemoryManagerReservedMemory []kubeletconfig.MemoryReservation
+	PodPidsLimit                            int64
+	EnforceCPULimits                        bool
+	CPUCFSQuotaPeriod                       time.Duration
+	TopologyManagerPolicy                   string
+	TopologyManagerPolicyOptions            map[string]string
 }
 
 type NodeAllocatableConfig struct {
 	KubeReservedCgroupName   string
 	SystemReservedCgroupName string
 	ReservedSystemCPUs       cpuset.CPUSet
-	EnforceNodeAllocatable   sets.String
+	EnforceNodeAllocatable   sets.Set[string]
 	KubeReserved             v1.ResourceList
 	SystemReserved           v1.ResourceList
 	HardEvictionThresholds   []evictionapi.Threshold
@@ -190,7 +190,7 @@ func parsePercentage(v string) (int64, error) {
 	return percentage, nil
 }
 
-// ParseQOSReserved parses the --qos-reserve-requests option
+// ParseQOSReserved parses the --qos-reserved option
 func ParseQOSReserved(m map[string]string) (*map[v1.ResourceName]int64, error) {
 	reservations := make(map[v1.ResourceName]int64)
 	for k, v := range m {

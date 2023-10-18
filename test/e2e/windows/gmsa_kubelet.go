@@ -39,9 +39,9 @@ import (
 	"github.com/onsi/gomega"
 )
 
-var _ = SIGDescribe("[Feature:Windows] GMSA Kubelet [Slow]", func() {
+var _ = sigDescribe("[Feature:Windows] GMSA Kubelet [Slow]", skipUnlessWindows(func() {
 	f := framework.NewDefaultFramework("gmsa-kubelet-test-windows")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.Describe("kubelet GMSA support", func() {
 		ginkgo.Context("when creating a pod with correct GMSA credential specs", func() {
@@ -133,7 +133,7 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Kubelet [Slow]", func() {
 			})
 		})
 	})
-})
+}))
 
 func generateDummyCredSpecs(domain string) *string {
 	shortName := strings.ToUpper(strings.Split(domain, ".")[0])

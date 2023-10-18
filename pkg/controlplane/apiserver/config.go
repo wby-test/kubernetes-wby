@@ -28,21 +28,27 @@ import (
 	"k8s.io/apiserver/pkg/endpoints/discovery/aggregated"
 	openapinamer "k8s.io/apiserver/pkg/endpoints/openapi"
 	genericfeatures "k8s.io/apiserver/pkg/features"
+	"k8s.io/apiserver/pkg/reconcilers"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/apiserver/pkg/server/egressselector"
 	"k8s.io/apiserver/pkg/server/filters"
 	serverstorage "k8s.io/apiserver/pkg/server/storage"
+	"k8s.io/apiserver/pkg/storageversion"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	utilflowcontrol "k8s.io/apiserver/pkg/util/flowcontrol"
 	"k8s.io/apiserver/pkg/util/openapi"
+	utilpeerproxy "k8s.io/apiserver/pkg/util/peerproxy"
 	clientgoinformers "k8s.io/client-go/informers"
 	clientgoclientset "k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/transport"
 	"k8s.io/component-base/version"
+	"k8s.io/klog/v2"
 	openapicommon "k8s.io/kube-openapi/pkg/common"
 
-	"k8s.io/kubernetes/cmd/kube-apiserver/app/options"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/controlplane"
+	controlplaneapiserver "k8s.io/kubernetes/pkg/controlplane/apiserver/options"
 	"k8s.io/kubernetes/pkg/kubeapiserver"
 	"k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
 	rbacrest "k8s.io/kubernetes/pkg/registry/rbac/rest"
@@ -50,7 +56,7 @@ import (
 
 // BuildGenericConfig takes the master server options and produces the genericapiserver.Config associated with it
 func BuildGenericConfig(
-	s *options.ServerRunOptions,
+	s controlplaneapiserver.CompletedOptions,
 	schemes []*runtime.Scheme,
 	getOpenAPIDefinitions func(ref openapicommon.ReferenceCallback) map[string]openapicommon.OpenAPIDefinition,
 ) (
@@ -146,7 +152,7 @@ func BuildGenericConfig(
 		lastErr = fmt.Errorf("invalid authorization config: %v", err)
 		return
 	}
-	if !sets.NewString(s.Authorization.Modes...).Has(modes.ModeRBAC) {
+	if s.Authorization != nil && !sets.NewString(s.Authorization.Modes...).Has(modes.ModeRBAC) {
 		genericConfig.DisabledPostStartHooks.Insert(rbacrest.PostStartHookName)
 	}
 
@@ -166,9 +172,15 @@ func BuildGenericConfig(
 	return
 }
 
-// BuildAuthorizer constructs the authorizer
-func BuildAuthorizer(s *options.ServerRunOptions, EgressSelector *egressselector.EgressSelector, versionedInformers clientgoinformers.SharedInformerFactory) (authorizer.Authorizer, authorizer.RuleResolver, error) {
-	authorizationConfig := s.Authorization.ToAuthorizationConfig(versionedInformers)
+// BuildAuthorizer constructs the authorizer. If authorization is not set in s, it returns nil, nil, nil
+func BuildAuthorizer(s controlplaneapiserver.CompletedOptions, EgressSelector *egressselector.EgressSelector, versionedInformers clientgoinformers.SharedInformerFactory) (authorizer.Authorizer, authorizer.RuleResolver, error) {
+	authorizationConfig, err := s.Authorization.ToAuthorizationConfig(versionedInformers)
+	if err != nil {
+		return nil, nil, err
+	}
+	if authorizationConfig == nil {
+		return nil, nil, nil
+	}
 
 	if EgressSelector != nil {
 		egressDialer, err := EgressSelector.Lookup(egressselector.ControlPlane.AsNetworkContext())
@@ -182,7 +194,7 @@ func BuildAuthorizer(s *options.ServerRunOptions, EgressSelector *egressselector
 }
 
 // BuildPriorityAndFairness constructs the guts of the API Priority and Fairness filter
-func BuildPriorityAndFairness(s *options.ServerRunOptions, extclient clientgoclientset.Interface, versionedInformer clientgoinformers.SharedInformerFactory) (utilflowcontrol.Interface, error) {
+func BuildPriorityAndFairness(s controlplaneapiserver.CompletedOptions, extclient clientgoclientset.Interface, versionedInformer clientgoinformers.SharedInformerFactory) (utilflowcontrol.Interface, error) {
 	if s.GenericServerRunOptions.MaxRequestsInFlight+s.GenericServerRunOptions.MaxMutatingRequestsInFlight <= 0 {
 		return nil, fmt.Errorf("invalid configuration: MaxRequestsInFlight=%d and MaxMutatingRequestsInFlight=%d; they must add up to something positive", s.GenericServerRunOptions.MaxRequestsInFlight, s.GenericServerRunOptions.MaxMutatingRequestsInFlight)
 	}
@@ -190,6 +202,52 @@ func BuildPriorityAndFairness(s *options.ServerRunOptions, extclient clientgocli
 		versionedInformer,
 		extclient.FlowcontrolV1beta3(),
 		s.GenericServerRunOptions.MaxRequestsInFlight+s.GenericServerRunOptions.MaxMutatingRequestsInFlight,
-		s.GenericServerRunOptions.RequestTimeout/4,
+	), nil
+}
+
+// CreatePeerEndpointLeaseReconciler creates a apiserver endpoint lease reconciliation loop
+// The peer endpoint leases are used to find network locations of apiservers for peer proxy
+func CreatePeerEndpointLeaseReconciler(c genericapiserver.Config, storageFactory serverstorage.StorageFactory) (reconcilers.PeerEndpointLeaseReconciler, error) {
+	ttl := controlplane.DefaultEndpointReconcilerTTL
+	config, err := storageFactory.NewConfig(api.Resource("apiServerPeerIPInfo"))
+	if err != nil {
+		return nil, fmt.Errorf("error creating storage factory config: %w", err)
+	}
+	reconciler, err := reconcilers.NewPeerEndpointLeaseReconciler(config, "/peerserverleases/", ttl)
+	return reconciler, err
+}
+
+func BuildPeerProxy(versionedInformer clientgoinformers.SharedInformerFactory, svm storageversion.Manager,
+	proxyClientCertFile string, proxyClientKeyFile string, peerCAFile string, peerAdvertiseAddress reconcilers.PeerAdvertiseAddress,
+	apiServerID string, reconciler reconcilers.PeerEndpointLeaseReconciler, serializer runtime.NegotiatedSerializer) (utilpeerproxy.Interface, error) {
+	if proxyClientCertFile == "" {
+		return nil, fmt.Errorf("error building peer proxy handler, proxy-cert-file not specified")
+	}
+	if proxyClientKeyFile == "" {
+		return nil, fmt.Errorf("error building peer proxy handler, proxy-key-file not specified")
+	}
+	// create proxy client config
+	clientConfig := &transport.Config{
+		TLS: transport.TLSConfig{
+			Insecure:   false,
+			CertFile:   proxyClientCertFile,
+			KeyFile:    proxyClientKeyFile,
+			CAFile:     peerCAFile,
+			ServerName: "kubernetes.default.svc",
+		}}
+
+	// build proxy transport
+	proxyRoundTripper, transportBuildingError := transport.New(clientConfig)
+	if transportBuildingError != nil {
+		klog.Error(transportBuildingError.Error())
+		return nil, transportBuildingError
+	}
+	return utilpeerproxy.NewPeerProxyHandler(
+		versionedInformer,
+		svm,
+		proxyRoundTripper,
+		apiServerID,
+		reconciler,
+		serializer,
 	), nil
 }

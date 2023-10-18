@@ -39,92 +39,7 @@ import (
 
 var _ = utils.SIGDescribe("CSIInlineVolumes", func() {
 	f := framework.NewDefaultFramework("csiinlinevolumes")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
-
-	/*
-		Release: v1.26
-		Testname: CSIInlineVolumes should support ephemeral CSIDrivers
-		Description: CSIDriver resources with ephemeral VolumeLifecycleMode
-		  should support create, get, list, and delete operations.
-	*/
-	framework.ConformanceIt("should support ephemeral VolumeLifecycleMode in CSIDriver API", func(ctx context.Context) {
-		// Create client
-		client := f.ClientSet.StorageV1().CSIDrivers()
-		defaultFSGroupPolicy := storagev1.ReadWriteOnceWithFSTypeFSGroupPolicy
-
-		// Driver that supports only Ephemeral
-		driver1 := &storagev1.CSIDriver{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "inline-driver-" + string(uuid.NewUUID()),
-				Labels: map[string]string{
-					"test": f.UniqueName,
-				},
-			},
-
-			Spec: storagev1.CSIDriverSpec{
-				VolumeLifecycleModes: []storagev1.VolumeLifecycleMode{storagev1.VolumeLifecycleEphemeral},
-				FSGroupPolicy:        &defaultFSGroupPolicy,
-			},
-		}
-
-		// Driver that supports both Ephemeral and Persistent
-		driver2 := &storagev1.CSIDriver{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "inline-driver-" + string(uuid.NewUUID()),
-				Labels: map[string]string{
-					"test": f.UniqueName,
-				},
-			},
-
-			Spec: storagev1.CSIDriverSpec{
-				VolumeLifecycleModes: []storagev1.VolumeLifecycleMode{
-					storagev1.VolumeLifecyclePersistent,
-					storagev1.VolumeLifecycleEphemeral,
-				},
-				FSGroupPolicy: &defaultFSGroupPolicy,
-			},
-		}
-
-		ginkgo.By("creating")
-		createdDriver1, err := client.Create(ctx, driver1, metav1.CreateOptions{})
-		framework.ExpectNoError(err)
-		createdDriver2, err := client.Create(ctx, driver2, metav1.CreateOptions{})
-		framework.ExpectNoError(err)
-		_, err = client.Create(ctx, driver1, metav1.CreateOptions{})
-		if !apierrors.IsAlreadyExists(err) {
-			framework.Failf("expected 409, got %#v", err)
-		}
-
-		ginkgo.By("getting")
-		retrievedDriver1, err := client.Get(ctx, createdDriver1.Name, metav1.GetOptions{})
-		framework.ExpectNoError(err)
-		framework.ExpectEqual(retrievedDriver1.UID, createdDriver1.UID)
-		retrievedDriver2, err := client.Get(ctx, createdDriver2.Name, metav1.GetOptions{})
-		framework.ExpectNoError(err)
-		framework.ExpectEqual(retrievedDriver2.UID, createdDriver2.UID)
-
-		ginkgo.By("listing")
-		driverList, err := client.List(ctx, metav1.ListOptions{LabelSelector: "test=" + f.UniqueName})
-		framework.ExpectNoError(err)
-		framework.ExpectEqual(len(driverList.Items), 2, "filtered list should have 2 items, got: %s", driverList)
-
-		ginkgo.By("deleting")
-		for _, driver := range driverList.Items {
-			err := client.Delete(ctx, driver.Name, metav1.DeleteOptions{})
-			framework.ExpectNoError(err)
-			retrievedDriver, err := client.Get(ctx, driver.Name, metav1.GetOptions{})
-			switch {
-			case apierrors.IsNotFound(err):
-				// Okay, normal case.
-			case err != nil:
-				framework.Failf("expected 404, got %#v", err)
-			case retrievedDriver.DeletionTimestamp != nil:
-				// Okay, normal case.
-			default:
-				framework.Failf("CSIDriver should have been deleted or have DeletionTimestamp, but instead got: %s", retrievedDriver)
-			}
-		}
-	})
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	/*
 		Release: v1.26
@@ -202,17 +117,17 @@ var _ = utils.SIGDescribe("CSIInlineVolumes", func() {
 		ginkgo.By("getting")
 		retrievedPod, err := client.Get(ctx, podName, metav1.GetOptions{})
 		framework.ExpectNoError(err)
-		framework.ExpectEqual(retrievedPod.UID, createdPod.UID)
+		gomega.Expect(retrievedPod.UID).To(gomega.Equal(createdPod.UID))
 
 		ginkgo.By("listing in namespace")
 		podList, err := client.List(ctx, metav1.ListOptions{})
 		framework.ExpectNoError(err)
-		framework.ExpectEqual(len(podList.Items), 1, "list should have 1 items, got: %s", podList)
+		gomega.Expect(podList.Items).To(gomega.HaveLen(1), "list should have 1 items, got: %s", podList)
 
 		ginkgo.By("patching")
 		patchedPod, err := client.Patch(ctx, createdPod.Name, types.MergePatchType, []byte(`{"metadata":{"annotations":{"patched":"true"}}}`), metav1.PatchOptions{})
 		framework.ExpectNoError(err)
-		framework.ExpectEqual(patchedPod.Annotations["patched"], "true", "patched object should have the applied annotation")
+		gomega.Expect(patchedPod.Annotations).To(gomega.HaveKeyWithValue("patched", "true"), "patched object should have the applied annotation")
 
 		ginkgo.By("deleting")
 		err = client.Delete(ctx, createdPod.Name, metav1.DeleteOptions{})

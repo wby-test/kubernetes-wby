@@ -989,6 +989,35 @@ func genStringWithRule(rule string) func(maxLength *int64) *schema.Structural {
 	}
 }
 
+// genEnumWithRuleAndValues creates a function that accepts an optional maxLength
+// with given validation rule and a set of enum values, following the convention of existing tests.
+// The test has two checks, first with maxLength unset to check if maxLength can be concluded from enums,
+// second with maxLength set to ensure it takes precedence.
+func genEnumWithRuleAndValues(rule string, values ...string) func(maxLength *int64) *schema.Structural {
+	enums := make([]schema.JSON, 0, len(values))
+	for _, v := range values {
+		enums = append(enums, schema.JSON{Object: v})
+	}
+	return func(maxLength *int64) *schema.Structural {
+		return &schema.Structural{
+			Generic: schema.Generic{
+				Type: "string",
+			},
+			ValueValidation: &schema.ValueValidation{
+				MaxLength: maxLength,
+				Enum:      enums,
+			},
+			Extensions: schema.Extensions{
+				XValidations: apiextensions.ValidationRules{
+					{
+						Rule: rule,
+					},
+				},
+			},
+		}
+	}
+}
+
 func genBytesWithRule(rule string) func(maxLength *int64) *schema.Structural {
 	return func(maxLength *int64) *schema.Structural {
 		return &schema.Structural{
@@ -1683,17 +1712,19 @@ func TestCostEstimation(t *testing.T) {
 			name: "extended library replace",
 			schemaGenerator: func(max *int64) *schema.Structural {
 				strType := withMaxLength(primitiveType("string", ""), max)
+				beforeLen := int64(2)
+				afterLen := int64(4)
 				objType := objectType(map[string]schema.Structural{
 					"str":    strType,
-					"before": strType,
-					"after":  strType,
+					"before": withMaxLength(primitiveType("string", ""), &beforeLen),
+					"after":  withMaxLength(primitiveType("string", ""), &afterLen),
 				})
 				objType = withRule(objType, "self.str.replace(self.before, self.after) == 'does not matter'")
 				return &objType
 			},
-			expectedCalcCost: 629154,
-			setMaxElements:   10,
-			expectedSetCost:  16,
+			expectedCalcCost: 629154, // cost is based on the result size of the replace() call
+			setMaxElements:   4,
+			expectedSetCost:  12,
 		},
 		{
 			name: "extended library split",
@@ -1741,6 +1772,13 @@ func TestCostEstimation(t *testing.T) {
 			expectedCalcCost: 8,
 			setMaxElements:   42,
 			expectedSetCost:  8,
+		},
+		{
+			name:             "enums with maxLength equals to the longest possible value",
+			schemaGenerator:  genEnumWithRuleAndValues("self.contains('A')", "A", "B", "C", "LongValue"),
+			expectedCalcCost: 2,
+			setMaxElements:   1000,
+			expectedSetCost:  401,
 		},
 	}
 	for _, testCase := range cases {

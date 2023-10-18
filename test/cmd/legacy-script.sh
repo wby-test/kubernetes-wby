@@ -519,6 +519,14 @@ runTests() {
   fi
 
   #########################
+  # Ambiguous short name  #
+  #########################
+
+  if kube::test::if_supports_resource "${customresourcedefinitions}" ; then
+    record_command run_ambiguous_shortname_tests
+  fi
+
+  #########################
   # Assert categories     #
   #########################
 
@@ -616,6 +624,13 @@ runTests() {
   ######################
   if kube::test::if_supports_resource "${configmaps}" ; then
     record_command run_kubectl_delete_allnamespaces_tests
+  fi
+
+  ######################
+  # Delete --interactive   #
+  ######################
+  if kube::test::if_supports_resource "${configmaps}" ; then
+    record_command run_kubectl_delete_interactive_tests
   fi
 
   ##################

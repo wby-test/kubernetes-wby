@@ -71,7 +71,7 @@ func testingPod(name, value, defaultContainerName string) v1.Pod {
 
 var _ = SIGDescribe("Kubectl logs", func() {
 	f := framework.NewDefaultFramework("kubectl-logs")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelBaseline
+	f.NamespacePodSecurityLevel = admissionapi.LevelBaseline
 	defer ginkgo.GinkgoRecover()
 
 	var c clientset.Interface
@@ -111,7 +111,7 @@ var _ = SIGDescribe("Kubectl logs", func() {
 				'kubectl --since=1s' should output logs that are only 1 second older from now
 				'kubectl --since=24h' should output logs that are only 1 day older from now
 		*/
-		framework.ConformanceIt("should be able to retrieve and filter logs ", func(ctx context.Context) {
+		framework.ConformanceIt("should be able to retrieve and filter logs", func(ctx context.Context) {
 
 			ginkgo.By("Waiting for log generator to start.")
 			if !e2epod.CheckPodsRunningReadyOrSucceeded(ctx, c, ns, []string{podName}, framework.PodStartTimeout) {

@@ -208,11 +208,17 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 		if cc.DynInformerFactory != nil {
 			cc.DynInformerFactory.WaitForCacheSync(ctx.Done())
 		}
+
+		// Wait for all handlers to sync (all items in the initial list delivered) before scheduling.
+		if err := sched.WaitForHandlersSync(ctx); err != nil {
+			logger.Error(err, "waiting for handlers to sync")
+		}
+
+		logger.V(3).Info("Handlers synced")
 	}
 	if !cc.ComponentConfig.DelayCacheUntilActive || cc.LeaderElection == nil {
 		startInformersAndWaitForSync(ctx)
 	}
-
 	// If leader election is enabled, runCommand via LeaderElector until done and exit.
 	if cc.LeaderElection != nil {
 		cc.LeaderElection.Callbacks = leaderelection.LeaderCallbacks{
@@ -288,9 +294,8 @@ func newHealthzAndMetricsHandler(config *kubeschedulerconfig.KubeSchedulerConfig
 	pathRecorderMux := mux.NewPathRecorderMux("kube-scheduler")
 	healthz.InstallHandler(pathRecorderMux, checks...)
 	installMetricHandler(pathRecorderMux, informers, isLeader)
-	if utilfeature.DefaultFeatureGate.Enabled(features.ComponentSLIs) {
-		slis.SLIMetricsWithReset{}.Install(pathRecorderMux)
-	}
+	slis.SLIMetricsWithReset{}.Install(pathRecorderMux)
+
 	if config.EnableProfiling {
 		routes.Profiling{}.Install(pathRecorderMux)
 		if config.EnableContentionProfiling {
