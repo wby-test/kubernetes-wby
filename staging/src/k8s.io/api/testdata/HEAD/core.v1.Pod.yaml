@@ -72,6 +72,10 @@ spec:
               - valuesValue
             matchLabels:
               matchLabelsKey: matchLabelsValue
+          matchLabelKeys:
+          - matchLabelKeysValue
+          mismatchLabelKeys:
+          - mismatchLabelKeysValue
           namespaceSelector:
             matchExpressions:
             - key: keyValue
@@ -93,6 +97,10 @@ spec:
             - valuesValue
           matchLabels:
             matchLabelsKey: matchLabelsValue
+        matchLabelKeys:
+        - matchLabelKeysValue
+        mismatchLabelKeys:
+        - mismatchLabelKeysValue
         namespaceSelector:
           matchExpressions:
           - key: keyValue
@@ -115,6 +123,10 @@ spec:
               - valuesValue
             matchLabels:
               matchLabelsKey: matchLabelsValue
+          matchLabelKeys:
+          - matchLabelKeysValue
+          mismatchLabelKeys:
+          - mismatchLabelKeysValue
           namespaceSelector:
             matchExpressions:
             - key: keyValue
@@ -136,6 +148,10 @@ spec:
             - valuesValue
           matchLabels:
             matchLabelsKey: matchLabelsValue
+        matchLabelKeys:
+        - matchLabelKeysValue
+        mismatchLabelKeys:
+        - mismatchLabelKeysValue
         namespaceSelector:
           matchExpressions:
           - key: keyValue
@@ -971,6 +987,7 @@ spec:
             matchLabels:
               matchLabelsKey: matchLabelsValue
           storageClassName: storageClassNameValue
+          volumeAttributesClassName: volumeAttributesClassNameValue
           volumeMode: volumeModeValue
           volumeName: volumeNameValue
     fc:
@@ -1040,7 +1057,20 @@ spec:
     projected:
       defaultMode: 2
       sources:
-      - configMap:
+      - clusterTrustBundle:
+          labelSelector:
+            matchExpressions:
+            - key: keyValue
+              operator: operatorValue
+              values:
+              - valuesValue
+            matchLabels:
+              matchLabelsKey: matchLabelsValue
+          name: nameValue
+          optional: true
+          path: pathValue
+          signerName: signerNameValue
+        configMap:
           items:
           - key: keyValue
             mode: 3

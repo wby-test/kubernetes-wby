@@ -79,15 +79,6 @@ var (
 	MaxPodCreateDeletePerSync = 500
 )
 
-const (
-	// MaxFailedIndexesExceeded indicates that an indexed of a job failed
-	// https://kep.k8s.io/3850
-	// In Beta, this should be moved to staging as an API field.
-	jobReasonMaxFailedIndexesExceeded string = "MaxFailedIndexesExceeded"
-	// FailedIndexes means Job has failed indexes.
-	jobReasonFailedIndexes string = "FailedIndexes"
-)
-
 // Controller ensures that all Job objects have corresponding pods to
 // run their configured workload.
 type Controller struct {
@@ -847,9 +838,9 @@ func (jm *Controller) syncJob(ctx context.Context, key string) (rErr error) {
 			jobCtx.failedIndexes = calculateFailedIndexes(logger, &job, pods)
 			if jobCtx.finishedCondition == nil {
 				if job.Spec.MaxFailedIndexes != nil && jobCtx.failedIndexes.total() > int(*job.Spec.MaxFailedIndexes) {
-					jobCtx.finishedCondition = newCondition(batch.JobFailed, v1.ConditionTrue, jobReasonMaxFailedIndexesExceeded, "Job has exceeded the specified maximal number of failed indexes", jm.clock.Now())
+					jobCtx.finishedCondition = newCondition(batch.JobFailed, v1.ConditionTrue, batch.JobReasonMaxFailedIndexesExceeded, "Job has exceeded the specified maximal number of failed indexes", jm.clock.Now())
 				} else if jobCtx.failedIndexes.total() > 0 && jobCtx.failedIndexes.total()+jobCtx.succeededIndexes.total() >= int(*job.Spec.Completions) {
-					jobCtx.finishedCondition = newCondition(batch.JobFailed, v1.ConditionTrue, jobReasonFailedIndexes, "Job has failed indexes", jm.clock.Now())
+					jobCtx.finishedCondition = newCondition(batch.JobFailed, v1.ConditionTrue, batch.JobReasonFailedIndexes, "Job has failed indexes", jm.clock.Now())
 				}
 			}
 			jobCtx.podsWithDelayedDeletionPerIndex = getPodsWithDelayedDeletionPerIndex(logger, jobCtx)
@@ -923,10 +914,10 @@ func (jm *Controller) syncJob(ctx context.Context, key string) (rErr error) {
 	}
 
 	needsStatusUpdate := suspendCondChanged || active != job.Status.Active || !ptr.Equal(ready, job.Status.Ready)
+	needsStatusUpdate = needsStatusUpdate || !ptr.Equal(job.Status.Terminating, jobCtx.terminating)
 	job.Status.Active = active
 	job.Status.Ready = ready
 	job.Status.Terminating = jobCtx.terminating
-	needsStatusUpdate = needsStatusUpdate || !ptr.Equal(job.Status.Terminating, jobCtx.terminating)
 	err = jm.trackJobStatusAndRemoveFinalizers(ctx, jobCtx, needsStatusUpdate)
 	if err != nil {
 		return fmt.Errorf("tracking status: %w", err)
@@ -1555,6 +1546,9 @@ func (jm *Controller) manageJob(ctx context.Context, job *batch.Job, jobCtx *syn
 		}
 		podTemplate.Finalizers = appendJobCompletionFinalizerIfNotFound(podTemplate.Finalizers)
 
+		// Counters for pod creation status (used by the job_pods_creation_total metric)
+		var creationsSucceeded, creationsFailed int32 = 0, 0
+
 		// Batch the pod creates. Batch sizes start at SlowStartInitialBatchSize
 		// and double with each successful iteration in a kind of "slow start".
 		// This handles attempts to start large numbers of pods that would
@@ -1604,7 +1598,9 @@ func (jm *Controller) manageJob(ctx context.Context, job *batch.Job, jobCtx *syn
 						jm.expectations.CreationObserved(logger, jobKey)
 						atomic.AddInt32(&active, -1)
 						errCh <- err
+						atomic.AddInt32(&creationsFailed, 1)
 					}
+					atomic.AddInt32(&creationsSucceeded, 1)
 				}()
 			}
 			wait.Wait()
@@ -1623,6 +1619,7 @@ func (jm *Controller) manageJob(ctx context.Context, job *batch.Job, jobCtx *syn
 			}
 			diff -= batchSize
 		}
+		recordJobPodsCreationTotal(job, creationsSucceeded, creationsFailed)
 		return active, metrics.JobSyncActionPodsCreated, errorFromChannel(errCh)
 	}
 
@@ -1842,8 +1839,16 @@ func recordJobPodFinished(logger klog.Logger, job *batch.Job, oldCounters batch.
 	// in tandem, and now a previously completed index is
 	// now out of range (i.e. index >= spec.Completions).
 	if isIndexedJob(job) {
+		completions := int(*job.Spec.Completions)
 		if job.Status.CompletedIndexes != oldCounters.CompletedIndexes {
-			diff = parseIndexesFromString(logger, job.Status.CompletedIndexes, int(*job.Spec.Completions)).total() - parseIndexesFromString(logger, oldCounters.CompletedIndexes, int(*job.Spec.Completions)).total()
+			diff = indexesCount(logger, &job.Status.CompletedIndexes, completions) - indexesCount(logger, &oldCounters.CompletedIndexes, completions)
+		}
+		backoffLimitLabel := backoffLimitMetricsLabel(job)
+		metrics.JobFinishedIndexesTotal.WithLabelValues(metrics.Succeeded, backoffLimitLabel).Add(float64(diff))
+		if hasBackoffLimitPerIndex(job) && job.Status.FailedIndexes != oldCounters.FailedIndexes {
+			if failedDiff := indexesCount(logger, job.Status.FailedIndexes, completions) - indexesCount(logger, oldCounters.FailedIndexes, completions); failedDiff > 0 {
+				metrics.JobFinishedIndexesTotal.WithLabelValues(metrics.Failed, backoffLimitLabel).Add(float64(failedDiff))
+			}
 		}
 	} else {
 		diff = int(job.Status.Succeeded) - int(oldCounters.Succeeded)
@@ -1853,6 +1858,20 @@ func recordJobPodFinished(logger klog.Logger, job *batch.Job, oldCounters batch.
 	// Update failed metric.
 	diff = int(job.Status.Failed - oldCounters.Failed)
 	metrics.JobPodsFinished.WithLabelValues(completionMode, metrics.Failed).Add(float64(diff))
+}
+
+func indexesCount(logger klog.Logger, indexesStr *string, completions int) int {
+	if indexesStr == nil {
+		return 0
+	}
+	return parseIndexesFromString(logger, *indexesStr, completions).total()
+}
+
+func backoffLimitMetricsLabel(job *batch.Job) string {
+	if hasBackoffLimitPerIndex(job) {
+		return "perIndex"
+	}
+	return "global"
 }
 
 func recordJobPodFailurePolicyActions(job *batch.Job, podFailureCountByPolicyAction map[string]int) {
@@ -1896,5 +1915,25 @@ func (jm *Controller) cleanupPodFinalizers(job *batch.Job) {
 		if metav1.IsControlledBy(pod, job) && hasJobTrackingFinalizer(pod) {
 			jm.enqueueOrphanPod(pod)
 		}
+	}
+}
+
+func recordJobPodsCreationTotal(job *batch.Job, succeeded, failed int32) {
+	reason := metrics.PodCreateNew
+	if feature.DefaultFeatureGate.Enabled(features.JobPodReplacementPolicy) {
+		podsTerminating := job.Status.Terminating != nil && *job.Status.Terminating > 0
+		isRecreateAction := podsTerminating || job.Status.Failed > 0
+		if isRecreateAction {
+			reason = metrics.PodRecreateTerminatingOrFailed
+			if *job.Spec.PodReplacementPolicy == batch.Failed {
+				reason = metrics.PodRecreateFailed
+			}
+		}
+	}
+	if succeeded > 0 {
+		metrics.JobPodsCreationTotal.WithLabelValues(reason, metrics.Succeeded).Add(float64(succeeded))
+	}
+	if failed > 0 {
+		metrics.JobPodsCreationTotal.WithLabelValues(reason, metrics.Failed).Add(float64(failed))
 	}
 }

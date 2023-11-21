@@ -426,6 +426,11 @@ func isFailed(pod *v1.Pod) bool {
 	return pod.Status.Phase == v1.PodFailed
 }
 
+// isSucceeded returns true if pod has a Phase of PodSucceeded
+func isSucceeded(pod *v1.Pod) bool {
+	return pod.Status.Phase == v1.PodSucceeded
+}
+
 // isTerminating returns true if pod's DeletionTimestamp has been set
 func isTerminating(pod *v1.Pod) bool {
 	return pod.DeletionTimestamp != nil
@@ -582,8 +587,9 @@ func inconsistentStatus(set *apps.StatefulSet, status *apps.StatefulSetStatus) b
 // are set to 0.
 func completeRollingUpdate(set *apps.StatefulSet, status *apps.StatefulSetStatus) {
 	if set.Spec.UpdateStrategy.Type == apps.RollingUpdateStatefulSetStrategyType &&
-		status.UpdatedReplicas == status.Replicas &&
-		status.ReadyReplicas == status.Replicas {
+		status.UpdatedReplicas == *set.Spec.Replicas &&
+		status.ReadyReplicas == *set.Spec.Replicas &&
+		status.Replicas == *set.Spec.Replicas {
 		status.CurrentReplicas = status.UpdatedReplicas
 		status.CurrentRevision = status.UpdateRevision
 	}

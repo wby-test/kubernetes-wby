@@ -42,6 +42,8 @@ import (
 
 	"sigs.k8s.io/yaml"
 
+	utilkubectl "k8s.io/kubectl/pkg/cmd/util"
+
 	v1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -708,7 +710,7 @@ metadata:
 				gomega.Expect(ee.ExitStatus()).To(gomega.Equal(42))
 			})
 
-			ginkgo.It("[Slow] running a failing command without --restart=Never", func(ctx context.Context) {
+			f.It(f.WithSlow(), "running a failing command without --restart=Never", func(ctx context.Context) {
 				_, err := e2ekubectl.NewKubectlCommand(ns, "run", "-i", "--image="+busyboxImage, "--restart=OnFailure", podRunningTimeoutArg, "failure-2", "--", "/bin/sh", "-c", "cat && exit 42").
 					WithStdinData("abcd1234").
 					Exec()
@@ -721,7 +723,7 @@ metadata:
 				}
 			})
 
-			ginkgo.It("[Slow] running a failing command without --restart=Never, but with --rm", func(ctx context.Context) {
+			f.It(f.WithSlow(), "running a failing command without --restart=Never, but with --rm", func(ctx context.Context) {
 				_, err := e2ekubectl.NewKubectlCommand(ns, "run", "-i", "--image="+busyboxImage, "--restart=OnFailure", "--rm", podRunningTimeoutArg, "failure-3", "--", "/bin/sh", "-c", "cat && exit 42").
 					WithStdinData("abcd1234").
 					Exec()
@@ -735,7 +737,7 @@ metadata:
 				framework.ExpectNoError(e2epod.WaitForPodNotFoundInNamespace(ctx, f.ClientSet, "failure-3", ns, 2*v1.DefaultTerminationGracePeriodSeconds*time.Second))
 			})
 
-			ginkgo.It("[Slow] running a failing command with --leave-stdin-open", func(ctx context.Context) {
+			f.It(f.WithSlow(), "running a failing command with --leave-stdin-open", func(ctx context.Context) {
 				_, err := e2ekubectl.NewKubectlCommand(ns, "run", "-i", "--image="+busyboxImage, "--restart=Never", podRunningTimeoutArg, "failure-4", "--leave-stdin-open", "--", "/bin/sh", "-c", "exit 42").
 					WithStdinData("abcd1234").
 					Exec()
@@ -787,6 +789,66 @@ metadata:
 			ginkgo.By("executing a command with run and attach with stdin with open stdin should remain running")
 			e2ekubectl.NewKubectlCommand(ns, "run", "run-test-3", "--image="+busyboxImage, "--restart=OnFailure", podRunningTimeoutArg, "--attach=true", "--leave-stdin-open=true", "--stdin", "--", "sh", "-c", "cat && echo 'stdin closed'").
 				WithStdinData("abcd1234\n").
+				ExecOrDie(ns)
+
+			runOutput = waitForStdinContent("run-test-3", "abcd1234")
+			gomega.Expect(runOutput).To(gomega.ContainSubstring("abcd1234"))
+			gomega.Expect(runOutput).ToNot(gomega.ContainSubstring("stdin closed"))
+
+			g := func(pods []*v1.Pod) sort.Interface { return sort.Reverse(controller.ActivePods(pods)) }
+			runTestPod, _, err := polymorphichelpers.GetFirstPod(f.ClientSet.CoreV1(), ns, "run=run-test-3", 1*time.Minute, g)
+			framework.ExpectNoError(err)
+			framework.ExpectNoError(e2epod.WaitTimeoutForPodReadyInNamespace(ctx, c, runTestPod.Name, ns, time.Minute))
+
+			framework.ExpectNoError(c.CoreV1().Pods(ns).Delete(ctx, "run-test-3", metav1.DeleteOptions{}))
+		})
+
+		ginkgo.It("should support inline execution and attach with websockets or fallback to spdy", func(ctx context.Context) {
+			waitForStdinContent := func(pod, content string) string {
+				var logOutput string
+				err := wait.PollUntilContextTimeout(ctx, 10*time.Second, 5*time.Minute, false, func(ctx context.Context) (bool, error) {
+					logOutput = e2ekubectl.RunKubectlOrDie(ns, "logs", pod)
+					return strings.Contains(logOutput, content), nil
+				})
+				framework.ExpectNoError(err, "waiting for '%v' output", content)
+				return logOutput
+			}
+
+			ginkgo.By("executing a command with run and attach with stdin")
+			// We wait for a non-empty line so we know kubectl has attached
+			e2ekubectl.NewKubectlCommand(ns, "run", "run-test", "--image="+busyboxImage, "--restart=OnFailure", podRunningTimeoutArg, "--attach=true", "--stdin", "--", "sh", "-c", "echo -n read: && cat && echo 'stdin closed'").
+				WithStdinData("value\nabcd1234").
+				AppendEnv([]string{string(utilkubectl.RemoteCommandWebsockets), "true"}).
+				ExecOrDie(ns)
+
+			runOutput := waitForStdinContent("run-test", "stdin closed")
+			gomega.Expect(runOutput).To(gomega.ContainSubstring("read:value"))
+			gomega.Expect(runOutput).To(gomega.ContainSubstring("abcd1234"))
+			gomega.Expect(runOutput).To(gomega.ContainSubstring("stdin closed"))
+
+			framework.ExpectNoError(c.CoreV1().Pods(ns).Delete(ctx, "run-test", metav1.DeleteOptions{}))
+
+			ginkgo.By("executing a command with run and attach without stdin")
+			// There is a race on this scenario described in #73099
+			// It fails if we are not able to attach before the container prints
+			// "stdin closed", but hasn't exited yet.
+			// We wait 10 seconds before printing to give time to kubectl to attach
+			// to the container, this does not solve the race though.
+			e2ekubectl.NewKubectlCommand(ns, "run", "run-test-2", "--image="+busyboxImage, "--restart=OnFailure", podRunningTimeoutArg, "--attach=true", "--leave-stdin-open=true", "--", "sh", "-c", "cat && echo 'stdin closed'").
+				WithStdinData("abcd1234").
+				AppendEnv([]string{string(utilkubectl.RemoteCommandWebsockets), "true"}).
+				ExecOrDie(ns)
+
+			runOutput = waitForStdinContent("run-test-2", "stdin closed")
+			gomega.Expect(runOutput).ToNot(gomega.ContainSubstring("abcd1234"))
+			gomega.Expect(runOutput).To(gomega.ContainSubstring("stdin closed"))
+
+			framework.ExpectNoError(c.CoreV1().Pods(ns).Delete(ctx, "run-test-2", metav1.DeleteOptions{}))
+
+			ginkgo.By("executing a command with run and attach with stdin with open stdin should remain running")
+			e2ekubectl.NewKubectlCommand(ns, "run", "run-test-3", "--image="+busyboxImage, "--restart=OnFailure", podRunningTimeoutArg, "--attach=true", "--leave-stdin-open=true", "--stdin", "--", "sh", "-c", "cat && echo 'stdin closed'").
+				WithStdinData("abcd1234\n").
+				AppendEnv([]string{string(utilkubectl.RemoteCommandWebsockets), "true"}).
 				ExecOrDie(ns)
 
 			runOutput = waitForStdinContent("run-test-3", "abcd1234")
@@ -1830,7 +1892,7 @@ metadata:
 
 	// This test must run [Serial] because it modifies the node so it doesn't allow pods to execute on
 	// it, which will affect anything else running in parallel.
-	ginkgo.Describe("Kubectl taint [Serial]", func() {
+	f.Describe("Kubectl taint", framework.WithSerial(), func() {
 		ginkgo.It("should update the taint on a node", func(ctx context.Context) {
 			testTaint := v1.Taint{
 				Key:    fmt.Sprintf("kubernetes.io/e2e-taint-key-001-%s", string(uuid.NewUUID())),

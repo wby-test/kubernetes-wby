@@ -1,3 +1,25 @@
+- testname: Priority and Fairness FlowSchema API
+  codename: '[sig-api-machinery] API priority and fairness should support FlowSchema
+    API operations [Conformance]'
+  description: ' The flowcontrol.apiserver.k8s.io API group MUST exist in the /apis
+    discovery document. The flowcontrol.apiserver.k8s.io/v1 API group/version MUST
+    exist in the /apis/flowcontrol.apiserver.k8s.io discovery document. The flowschemas
+    and flowschemas/status resources MUST exist in the /apis/flowcontrol.apiserver.k8s.io/v1
+    discovery document. The flowschema resource must support create, get, list, watch,
+    update, patch, delete, and deletecollection.'
+  release: v1.29
+  file: test/e2e/apimachinery/flowcontrol.go
+- testname: Priority and Fairness PriorityLevelConfiguration API
+  codename: '[sig-api-machinery] API priority and fairness should support PriorityLevelConfiguration
+    API operations [Conformance]'
+  description: ' The flowcontrol.apiserver.k8s.io API group MUST exist in the /apis
+    discovery document. The flowcontrol.apiserver.k8s.io/v1 API group/version MUST
+    exist in the /apis/flowcontrol.apiserver.k8s.io discovery document. The prioritylevelconfiguration
+    and prioritylevelconfiguration/status resources MUST exist in the /apis/flowcontrol.apiserver.k8s.io/v1
+    discovery document. The prioritylevelconfiguration resource must support create,
+    get, list, watch, update, patch, delete, and deletecollection.'
+  release: v1.29
+  file: test/e2e/apimachinery/flowcontrol.go
 - testname: Admission webhook, list mutating webhooks
   codename: '[sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] listing
     mutating webhooks should work [Conformance]'
@@ -2466,10 +2488,11 @@
   file: test/e2e/common/node/sysctl.go
 - testname: Sysctl, test sysctls
   codename: '[sig-node] Sysctls [LinuxOnly] [NodeConformance] should support sysctls
-    [MinimumKubeletVersion:1.21] [Conformance]'
+    [MinimumKubeletVersion:1.21] [Environment:NotInUserNS] [Conformance]'
   description: 'Pod is created with kernel.shm_rmid_forced sysctl. Kernel.shm_rmid_forced
     must be set to 1 [LinuxOnly]: This test is marked as LinuxOnly since Windows does
-    not support sysctls'
+    not support sysctls [Environment:NotInUserNS]: The test fails in UserNS (as expected):
+    `open /proc/sys/kernel/shm_rmid_forced: permission denied`'
   release: v1.21
   file: test/e2e/common/node/sysctl.go
 - testname: Environment variables, expansion
@@ -3007,6 +3030,18 @@
     able to start with Secret and ConfigMap volumes mounted into the container.
   release: v1.13
   file: test/e2e/storage/empty_dir_wrapper.go
+- testname: PersistentVolumes(Claims), apply changes to a pv/pvc status
+  codename: '[sig-storage] PersistentVolumes CSI Conformance should apply changes
+    to a pv/pvc status [Conformance]'
+  description: Creating PV and PVC MUST succeed. Listing PVs with a labelSelector
+    MUST succeed. Listing PVCs in a namespace MUST succeed. Reading PVC status MUST
+    succeed with a valid phase found. Reading PV status MUST succeed with a valid
+    phase found. Patching the PVC status MUST succeed with its new condition found.
+    Patching the PV status MUST succeed with the new reason/message found. Updating
+    the PVC status MUST succeed with its new condition found. Updating the PV status
+    MUST succeed with the new reason/message found.
+  release: v1.29
+  file: test/e2e/storage/persistent_volumes.go
 - testname: PersistentVolumes(Claims), lifecycle
   codename: '[sig-storage] PersistentVolumes CSI Conformance should run through the
     lifecycle of a PV and a PVC [Conformance]'
@@ -3022,7 +3057,7 @@
   file: test/e2e/storage/persistent_volumes.go
 - testname: Projected Volume, multiple projections
   codename: '[sig-storage] Projected combined should project all components that make
-    up the projection API [Projection][NodeConformance] [Conformance]'
+    up the projection API [Projection] [NodeConformance] [Conformance]'
   description: A Pod is created with a projected volume source for secrets, configMap
     and downwardAPI with pod name, cpu and memory limits and cpu and memory requests.
     Pod MUST be able to read the secrets, configMap values and the cpu and memory

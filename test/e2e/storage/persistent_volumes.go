@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/uuid"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
@@ -212,7 +213,7 @@ var _ = utils.SIGDescribe("PersistentVolumes", func() {
 			})
 
 			// Create new PV without claim, verify it's in Available state and LastPhaseTransitionTime is set.
-			ginkgo.It("create a PV: test phase transition timestamp is set and phase is Available [Feature:PersistentVolumeLastPhaseTransitionTime]", func(ctx context.Context) {
+			f.It("create a PV: test phase transition timestamp is set and phase is Available", feature.PersistentVolumeLastPhaseTransitionTime, func(ctx context.Context) {
 				pvObj := e2epv.MakePersistentVolume(pvConfig)
 				pv, err = e2epv.CreatePV(ctx, c, f.Timeouts, pvObj)
 				framework.ExpectNoError(err)
@@ -231,7 +232,7 @@ var _ = utils.SIGDescribe("PersistentVolumes", func() {
 
 			// Create PV and pre-bound PVC that matches the PV, verify that when PV and PVC bind
 			// the LastPhaseTransitionTime filed of the PV is updated.
-			ginkgo.It("create a PV and a pre-bound PVC: test phase transition timestamp is set [Feature:PersistentVolumeLastPhaseTransitionTime]", func(ctx context.Context) {
+			f.It("create a PV and a pre-bound PVC: test phase transition timestamp is set", feature.PersistentVolumeLastPhaseTransitionTime, func(ctx context.Context) {
 				pv, pvc, err = e2epv.CreatePVPVC(ctx, c, f.Timeouts, pvConfig, pvcConfig, ns, true)
 				framework.ExpectNoError(err)
 
@@ -251,7 +252,7 @@ var _ = utils.SIGDescribe("PersistentVolumes", func() {
 			// Create PV and pre-bound PVC that matches the PV, verify that when PV and PVC bind
 			// the LastPhaseTransitionTime field of the PV is set, then delete the PVC to change PV phase to
 			// released and validate PV LastPhaseTransitionTime correctly updated timestamp.
-			ginkgo.It("create a PV and a pre-bound PVC: test phase transition timestamp multiple updates [Feature:PersistentVolumeLastPhaseTransitionTime]", func(ctx context.Context) {
+			f.It("create a PV and a pre-bound PVC: test phase transition timestamp multiple updates", feature.PersistentVolumeLastPhaseTransitionTime, func(ctx context.Context) {
 				pv, pvc, err = e2epv.CreatePVPVC(ctx, c, f.Timeouts, pvConfig, pvcConfig, ns, true)
 				framework.ExpectNoError(err)
 
@@ -331,7 +332,7 @@ var _ = utils.SIGDescribe("PersistentVolumes", func() {
 
 			// Create 4 PVs and 2 PVCs.
 			// Note: PVs are created before claims and no pre-binding.
-			ginkgo.It("should create 4 PVs and 2 PVCs: test write access [Slow]", func(ctx context.Context) {
+			f.It("should create 4 PVs and 2 PVCs: test write access", f.WithSlow(), func(ctx context.Context) {
 				numPVs, numPVCs := 4, 2
 				pvols, claims, err = e2epv.CreatePVsPVCs(ctx, numPVs, numPVCs, c, f.Timeouts, ns, pvConfig, pvcConfig)
 				framework.ExpectNoError(err)
@@ -452,14 +453,18 @@ var _ = utils.SIGDescribe("PersistentVolumes", func() {
 
 			pvNamePrefix := ns + "-"
 			pvHostPathConfig := e2epv.PersistentVolumeConfig{
-				NamePrefix: pvNamePrefix,
-				Labels:     volLabel,
+				NamePrefix:       pvNamePrefix,
+				Labels:           volLabel,
+				StorageClassName: ns,
 				PVSource: v1.PersistentVolumeSource{
 					CSI: &v1.CSIPersistentVolumeSource{
 						Driver:       csiDriver.Name,
 						VolumeHandle: "e2e-conformance",
 					},
 				},
+			}
+			pvcConfig := e2epv.PersistentVolumeClaimConfig{
+				StorageClassName: &ns,
 			}
 
 			numPVs, numPVCs := 1, 1
@@ -650,7 +655,18 @@ var _ = utils.SIGDescribe("PersistentVolumes", func() {
 			framework.ExpectNoError(err, "Timeout while waiting to confirm PV %q deletion", retrievedPV.Name)
 		})
 
-		ginkgo.It("should apply changes to a pv/pvc status", func(ctx context.Context) {
+		/*
+			Release: v1.29
+			Testname: PersistentVolumes(Claims), apply changes to a pv/pvc status
+			Description: Creating PV and PVC MUST succeed. Listing PVs with a labelSelector
+			 MUST succeed. Listing PVCs in a namespace MUST succeed. Reading PVC status MUST
+			 succeed with a valid phase found. Reading PV status MUST succeed with a valid
+			 phase found. Patching the PVC status MUST succeed with its new condition found.
+			 Patching the PV status MUST succeed with the new reason/message found. Updating
+			 the PVC status MUST succeed with its new condition found. Updating the PV status
+			 MUST succeed with the new reason/message found.
+		*/
+		framework.ConformanceIt("should apply changes to a pv/pvc status", func(ctx context.Context) {
 
 			pvClient := c.CoreV1().PersistentVolumes()
 			pvcClient := c.CoreV1().PersistentVolumeClaims(ns)
@@ -667,6 +683,10 @@ var _ = utils.SIGDescribe("PersistentVolumes", func() {
 						VolumeHandle: "e2e-status-conformance",
 					},
 				},
+			}
+
+			pvcConfig := e2epv.PersistentVolumeClaimConfig{
+				StorageClassName: &ns,
 			}
 
 			numPVs, numPVCs := 1, 1
@@ -779,7 +799,7 @@ var _ = utils.SIGDescribe("PersistentVolumes", func() {
 				e2estatefulset.DeleteAllStatefulSets(ctx, c, ns)
 			})
 
-			ginkgo.It("should be reschedulable [Slow]", func(ctx context.Context) {
+			f.It("should be reschedulable", f.WithSlow(), func(ctx context.Context) {
 				// Only run on providers with default storageclass
 				e2epv.SkipIfNoDefaultStorageClass(ctx, c)
 

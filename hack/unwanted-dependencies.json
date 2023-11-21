@@ -76,24 +76,21 @@
     "unwantedReferences": {
       "cloud.google.com/go": [
         "cloud.google.com/go/compute",
-        "github.com/google/cadvisor",
         "google.golang.org/genproto"
       ],
       "cloud.google.com/go/bigquery": [
-        "cloud.google.com/go/storage",
         "google.golang.org/genproto"
       ],
       "cloud.google.com/go/compute": [
         "cloud.google.com/go/compute/metadata",
+        "github.com/google/cadvisor",
         "go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc",
+        "golang.org/x/oauth2",
         "google.golang.org/genproto",
         "google.golang.org/grpc"
       ],
       "cloud.google.com/go/firestore": [
         "google.golang.org/genproto"
-      ],
-      "cloud.google.com/go/storage": [
-        "cloud.google.com/go"
       ],
       "github.com/GoogleCloudPlatform/k8s-cloud-provider": [
         "k8s.io/kubernetes",
@@ -110,7 +107,6 @@
         "github.com/containerd/cgroups",
         "github.com/containerd/ttrpc",
         "github.com/containerd/typeurl",
-        "github.com/gogo/googleapis",
         "github.com/google/cadvisor",
         "github.com/grpc-ecosystem/go-grpc-middleware",
         "go.etcd.io/etcd/api/v3",
@@ -134,6 +130,10 @@
         "k8s.io/kubernetes",
         "k8s.io/legacy-cloud-providers"
       ],
+      "github.com/google/s2a-go": [
+        "cloud.google.com/go/compute",
+        "google.golang.org/api"
+      ],
       "github.com/google/shlex": [
         "sigs.k8s.io/kustomize/api",
         "sigs.k8s.io/kustomize/kustomize/v5"
@@ -143,10 +143,7 @@
         "google.golang.org/api"
       ],
       "github.com/googleapis/gax-go/v2": [
-        "cloud.google.com/go",
-        "cloud.google.com/go/bigquery",
-        "cloud.google.com/go/compute",
-        "cloud.google.com/go/storage"
+        "cloud.google.com/go/compute"
       ],
       "github.com/gregjones/httpcache": [
         "k8s.io/client-go"
@@ -177,7 +174,6 @@
       ],
       "github.com/pkg/errors": [
         "github.com/Microsoft/hcsshim",
-        "github.com/aws/aws-sdk-go",
         "github.com/containerd/continuity",
         "github.com/containerd/fifo",
         "github.com/containerd/go-runc",
@@ -197,7 +193,6 @@
         "k8s.io/legacy-cloud-providers"
       ],
       "go.opencensus.io": [
-        "cloud.google.com/go",
         "cloud.google.com/go/compute",
         "github.com/Microsoft/hcsshim",
         "google.golang.org/api"
@@ -207,10 +202,7 @@
         "github.com/google/cel-go"
       ],
       "google.golang.org/api": [
-        "cloud.google.com/go",
-        "cloud.google.com/go/bigquery",
         "cloud.google.com/go/compute",
-        "cloud.google.com/go/storage",
         "github.com/GoogleCloudPlatform/k8s-cloud-provider",
         "github.com/googleapis/gax-go/v2",
         "k8s.io/kubernetes",
@@ -218,6 +210,7 @@
       ],
       "google.golang.org/appengine": [
         "cloud.google.com/go/compute",
+        "github.com/grpc-ecosystem/grpc-gateway/v2",
         "github.com/prometheus/client_golang",
         "github.com/prometheus/common",
         "go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc",
@@ -226,26 +219,20 @@
         "google.golang.org/grpc"
       ],
       "google.golang.org/genproto": [
-        "cloud.google.com/go",
-        "cloud.google.com/go/bigquery",
         "cloud.google.com/go/compute",
-        "cloud.google.com/go/storage",
         "github.com/container-storage-interface/spec",
         "github.com/containerd/ttrpc",
-        "github.com/google/cadvisor",
         "github.com/googleapis/gax-go/v2",
         "github.com/grpc-ecosystem/go-grpc-middleware",
         "github.com/grpc-ecosystem/grpc-gateway",
         "github.com/grpc-ecosystem/grpc-gateway/v2",
         "go.etcd.io/etcd/api/v3",
         "go.etcd.io/etcd/client/v3",
-        "go.etcd.io/etcd/pkg/v3",
         "go.etcd.io/etcd/server/v3",
         "go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc",
-        "go.opentelemetry.io/otel/exporters/otlp/otlptrace",
-        "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc",
         "google.golang.org/api",
         "google.golang.org/genproto/googleapis/api",
+        "google.golang.org/genproto/googleapis/rpc",
         "google.golang.org/grpc"
       ]
     },
@@ -254,6 +241,7 @@
       "github.com/GoogleCloudPlatform/k8s-cloud-provider",
       "github.com/gogo/protobuf",
       "github.com/golang/mock",
+      "github.com/google/s2a-go",
       "github.com/google/shlex",
       "github.com/googleapis/enterprise-certificate-proxy",
       "github.com/googleapis/gax-go/v2",

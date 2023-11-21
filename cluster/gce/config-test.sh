@@ -329,13 +329,7 @@ export ENABLE_DNS_HORIZONTAL_AUTOSCALER=${KUBE_ENABLE_DNS_HORIZONTAL_AUTOSCALER:
 #   none           - Not run node problem detector.
 #   daemonset      - Run node problem detector as daemonset.
 #   standalone     - Run node problem detector as standalone system daemon.
-if [[ "${NODE_OS_DISTRIBUTION}" = 'gci' ]]; then
-  # Enable standalone mode by default for gci.
-  ENABLE_NODE_PROBLEM_DETECTOR=${KUBE_ENABLE_NODE_PROBLEM_DETECTOR:-standalone}
-else
-  ENABLE_NODE_PROBLEM_DETECTOR=${KUBE_ENABLE_NODE_PROBLEM_DETECTOR:-daemonset}
-fi
-export ENABLE_NODE_PROBLEM_DETECTOR
+export ENABLE_NODE_PROBLEM_DETECTOR=${KUBE_ENABLE_NODE_PROBLEM_DETECTOR:-daemonset}
 NODE_PROBLEM_DETECTOR_VERSION=${NODE_PROBLEM_DETECTOR_VERSION:-}
 NODE_PROBLEM_DETECTOR_TAR_HASH=${NODE_PROBLEM_DETECTOR_TAR_HASH:-}
 NODE_PROBLEM_DETECTOR_RELEASE_PATH=${NODE_PROBLEM_DETECTOR_RELEASE_PATH:-}
@@ -413,7 +407,7 @@ fi
 CUSTOM_INGRESS_YAML=${CUSTOM_INGRESS_YAML:-}
 
 if [[ -z "${KUBE_ADMISSION_CONTROL:-}" ]]; then
-  ADMISSION_CONTROL='NamespaceLifecycle,LimitRanger,ServiceAccount,PersistentVolumeLabel,DefaultStorageClass,DefaultTolerationSeconds,NodeRestriction,Priority,StorageObjectInUseProtection,PersistentVolumeClaimResize,RuntimeClass'
+  ADMISSION_CONTROL='NamespaceLifecycle,LimitRanger,ServiceAccount,DefaultStorageClass,DefaultTolerationSeconds,NodeRestriction,Priority,StorageObjectInUseProtection,PersistentVolumeClaimResize,RuntimeClass'
   # ResourceQuota must come last, or a creation is recorded, but the pod may be forbidden.
   ADMISSION_CONTROL="${ADMISSION_CONTROL},MutatingAdmissionWebhook,ValidatingAdmissionWebhook,ResourceQuota"
 else

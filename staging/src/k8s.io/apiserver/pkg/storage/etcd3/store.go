@@ -77,7 +77,6 @@ type store struct {
 	groupResource       schema.GroupResource
 	groupResourceString string
 	watcher             *watcher
-	pagingEnabled       bool
 	leaseManager        *leaseManager
 }
 
@@ -96,11 +95,11 @@ type objState struct {
 }
 
 // New returns an etcd3 implementation of storage.Interface.
-func New(c *clientv3.Client, codec runtime.Codec, newFunc, newListFunc func() runtime.Object, prefix, resourcePrefix string, groupResource schema.GroupResource, transformer value.Transformer, pagingEnabled bool, leaseManagerConfig LeaseManagerConfig) storage.Interface {
-	return newStore(c, codec, newFunc, newListFunc, prefix, resourcePrefix, groupResource, transformer, pagingEnabled, leaseManagerConfig)
+func New(c *clientv3.Client, codec runtime.Codec, newFunc, newListFunc func() runtime.Object, prefix, resourcePrefix string, groupResource schema.GroupResource, transformer value.Transformer, leaseManagerConfig LeaseManagerConfig) storage.Interface {
+	return newStore(c, codec, newFunc, newListFunc, prefix, resourcePrefix, groupResource, transformer, leaseManagerConfig)
 }
 
-func newStore(c *clientv3.Client, codec runtime.Codec, newFunc, newListFunc func() runtime.Object, prefix, resourcePrefix string, groupResource schema.GroupResource, transformer value.Transformer, pagingEnabled bool, leaseManagerConfig LeaseManagerConfig) *store {
+func newStore(c *clientv3.Client, codec runtime.Codec, newFunc, newListFunc func() runtime.Object, prefix, resourcePrefix string, groupResource schema.GroupResource, transformer value.Transformer, leaseManagerConfig LeaseManagerConfig) *store {
 	versioner := storage.APIObjectVersioner{}
 	// for compatibility with etcd2 impl.
 	// no-op for default prefix of '/registry'.
@@ -129,7 +128,6 @@ func newStore(c *clientv3.Client, codec runtime.Codec, newFunc, newListFunc func
 		codec:               codec,
 		versioner:           versioner,
 		transformer:         transformer,
-		pagingEnabled:       pagingEnabled,
 		pathPrefix:          pathPrefix,
 		groupResource:       groupResource,
 		groupResourceString: groupResource.String(),
@@ -623,27 +621,23 @@ func (s *store) GetList(ctx context.Context, key string, opts storage.ListOption
 	limit := opts.Predicate.Limit
 	var paging bool
 	options := make([]clientv3.OpOption, 0, 4)
-	if s.pagingEnabled && opts.Predicate.Limit > 0 {
+	if opts.Predicate.Limit > 0 {
 		paging = true
 		options = append(options, clientv3.WithLimit(limit))
 		limitOption = &options[len(options)-1]
 	}
 
-	newItemFunc := getNewItemFunc(listObj, v)
-
-	var fromRV *uint64
-	if len(opts.ResourceVersion) > 0 {
-		parsedRV, err := s.versioner.ParseResourceVersion(opts.ResourceVersion)
-		if err != nil {
-			return apierrors.NewBadRequest(fmt.Sprintf("invalid resource version: %v", err))
-		}
-		fromRV = &parsedRV
+	if opts.Recursive {
+		rangeEnd := clientv3.GetPrefixRangeEnd(keyPrefix)
+		options = append(options, clientv3.WithRange(rangeEnd))
 	}
+
+	newItemFunc := getNewItemFunc(listObj, v)
 
 	var continueRV, withRev int64
 	var continueKey string
 	switch {
-	case opts.Recursive && s.pagingEnabled && len(opts.Predicate.Continue) > 0:
+	case opts.Recursive && len(opts.Predicate.Continue) > 0:
 		continueKey, continueRV, err = storage.DecodeContinue(opts.Predicate.Continue, keyPrefix)
 		if err != nil {
 			return apierrors.NewBadRequest(fmt.Sprintf("invalid continue token: %v", err))
@@ -659,28 +653,26 @@ func (s *store) GetList(ctx context.Context, key string, opts storage.ListOption
 		if continueRV > 0 {
 			withRev = continueRV
 		}
-	default:
-		if fromRV != nil {
-			switch opts.ResourceVersionMatch {
-			case metav1.ResourceVersionMatchNotOlderThan:
-				// The not older than constraint is checked after we get a response from etcd,
-				// and returnedRV is then set to the revision we get from the etcd response.
-			case metav1.ResourceVersionMatchExact:
-				withRev = int64(*fromRV)
-			case "": // legacy case
-				if opts.Recursive && s.pagingEnabled && opts.Predicate.Limit > 0 && *fromRV > 0 {
-					withRev = int64(*fromRV)
-				}
-			default:
-				return fmt.Errorf("unknown ResourceVersionMatch value: %v", opts.ResourceVersionMatch)
+	case len(opts.ResourceVersion) > 0:
+		parsedRV, err := s.versioner.ParseResourceVersion(opts.ResourceVersion)
+		if err != nil {
+			return apierrors.NewBadRequest(fmt.Sprintf("invalid resource version: %v", err))
+		}
+		switch opts.ResourceVersionMatch {
+		case metav1.ResourceVersionMatchNotOlderThan:
+			// The not older than constraint is checked after we get a response from etcd,
+			// and returnedRV is then set to the revision we get from the etcd response.
+		case metav1.ResourceVersionMatchExact:
+			withRev = int64(parsedRV)
+		case "": // legacy case
+			if opts.Recursive && opts.Predicate.Limit > 0 && parsedRV > 0 {
+				withRev = int64(parsedRV)
 			}
+		default:
+			return fmt.Errorf("unknown ResourceVersionMatch value: %v", opts.ResourceVersionMatch)
 		}
 	}
 
-	if opts.Recursive {
-		rangeEnd := clientv3.GetPrefixRangeEnd(keyPrefix)
-		options = append(options, clientv3.WithRange(rangeEnd))
-	}
 	if withRev != 0 {
 		options = append(options, clientv3.WithRev(withRev))
 	}
@@ -718,6 +710,11 @@ func (s *store) GetList(ctx context.Context, key string, opts storage.ListOption
 
 		if len(getResp.Kvs) == 0 && getResp.More {
 			return fmt.Errorf("no results were found, but etcd indicated there were more values remaining")
+		}
+		// indicate to the client which resource version was returned, and use the same resource version for subsequent requests.
+		if withRev == 0 {
+			withRev = getResp.Header.Revision
+			options = append(options, clientv3.WithRev(withRev))
 		}
 
 		// avoid small allocations for the result slice, since this can be called in many
@@ -770,14 +767,6 @@ func (s *store) GetList(ctx context.Context, key string, opts storage.ListOption
 			*limitOption = clientv3.WithLimit(limit)
 		}
 		preparedKey = string(lastKey) + "\x00"
-		if withRev == 0 {
-			withRev = getResp.Header.Revision
-			options = append(options, clientv3.WithRev(withRev))
-		}
-	}
-	// indicate to the client which resource version was returned
-	if withRev == 0 {
-		withRev = getResp.Header.Revision
 	}
 
 	if v.IsNil() {

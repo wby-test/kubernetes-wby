@@ -44,6 +44,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
 	"k8s.io/kubernetes/pkg/kubelet/pluginmanager/cache"
+	"k8s.io/kubernetes/pkg/kubelet/types"
 	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
@@ -236,12 +237,12 @@ func (m *ManagerImpl) PluginDisconnected(resourceName string) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	if _, exists := m.endpoints[resourceName]; exists {
+	if ep, exists := m.endpoints[resourceName]; exists {
 		m.markResourceUnhealthy(resourceName)
-		klog.V(2).InfoS("Endpoint became unhealthy", "resourceName", resourceName, "endpoint", m.endpoints[resourceName])
-	}
+		klog.V(2).InfoS("Endpoint became unhealthy", "resourceName", resourceName, "endpoint", ep)
 
-	m.endpoints[resourceName].e.setStopTime(time.Now())
+		ep.e.setStopTime(time.Now())
+	}
 }
 
 // PluginListAndWatchReceiver receives ListAndWatchResponse from a device plugin
@@ -339,7 +340,14 @@ func (m *ManagerImpl) Allocate(pod *v1.Pod, container *v1.Container) error {
 			if err := m.allocateContainerResources(pod, container, m.devicesToReuse[string(pod.UID)]); err != nil {
 				return err
 			}
-			m.podDevices.addContainerAllocatedResources(string(pod.UID), container.Name, m.devicesToReuse[string(pod.UID)])
+			if !types.IsRestartableInitContainer(&initContainer) {
+				m.podDevices.addContainerAllocatedResources(string(pod.UID), container.Name, m.devicesToReuse[string(pod.UID)])
+			} else {
+				// If the init container is restartable, we need to keep the
+				// devices allocated. In other words, we should remove them
+				// from the devicesToReuse.
+				m.podDevices.removeContainerAllocatedResources(string(pod.UID), container.Name, m.devicesToReuse[string(pod.UID)])
+			}
 			return nil
 		}
 	}

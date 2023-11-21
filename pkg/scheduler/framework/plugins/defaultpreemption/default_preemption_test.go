@@ -1389,7 +1389,7 @@ func TestSelectBestCandidate(t *testing.T) {
 			}
 			offset, numCandidates := pl.GetOffsetAndNumCandidates(int32(len(nodeInfos)))
 			candidates, _, _ := pe.DryRunPreemption(ctx, tt.pod, nodeInfos, nil, offset, numCandidates)
-			s := pe.SelectCandidate(logger, candidates)
+			s := pe.SelectCandidate(ctx, candidates)
 			if s == nil || len(s.Name()) == 0 {
 				return
 			}
@@ -1773,7 +1773,7 @@ func TestPreempt(t *testing.T) {
 				Interface:  &pl,
 			}
 			res, status := pe.Preempt(ctx, test.pod, make(framework.NodeToStatusMap))
-			if !status.IsSuccess() && !status.IsUnschedulable() {
+			if !status.IsSuccess() && !status.IsRejected() {
 				t.Errorf("unexpected error in preemption: %v", status.AsError())
 			}
 			if diff := cmp.Diff(test.want, res); diff != "" {
@@ -1812,7 +1812,7 @@ func TestPreempt(t *testing.T) {
 
 			// Call preempt again and make sure it doesn't preempt any more pods.
 			res, status = pe.Preempt(ctx, test.pod, make(framework.NodeToStatusMap))
-			if !status.IsSuccess() && !status.IsUnschedulable() {
+			if !status.IsSuccess() && !status.IsRejected() {
 				t.Errorf("unexpected error in preemption: %v", status.AsError())
 			}
 			if res != nil && res.NominatingInfo != nil && len(deletedPodNames) > 0 {

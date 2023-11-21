@@ -108,6 +108,8 @@ type Options struct {
 	WriteConfigTo string
 	// CleanupAndExit, when true, makes the proxy server clean up iptables and ipvs rules, then exit.
 	CleanupAndExit bool
+	// InitAndExit, when true, makes the proxy server makes configurations that need privileged access, then exit.
+	InitAndExit bool
 	// WindowsService should be set to true if kube-proxy is running as a service on Windows.
 	// Its corresponding flag only gets registered in Windows builds
 	WindowsService bool
@@ -168,7 +170,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 			"The purpose of this format is make sure you have the opportunity to notice if the next release hides additional metrics, "+
 			"rather than being surprised when they are permanently removed in the release after that. "+
 			"This parameter is ignored if a config file is specified by --config.")
-
+	fs.BoolVar(&o.InitAndExit, "init-only", o.InitAndExit, "If true, perform any initialization steps that must be done with full root privileges, and then exit. After doing this, you can run kube-proxy again with only the CAP_NET_ADMIN capability.")
 	fs.Var(&o.config.Mode, "proxy-mode", "Which proxy mode to use: on Linux this can be 'iptables' (default) or 'ipvs'. On Windows the only supported value is 'kernelspace'."+
 		"This parameter is ignored if a config file is specified by --config.")
 
@@ -207,6 +209,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 		&o.config.Conntrack.TCPCloseWaitTimeout.Duration, "conntrack-tcp-timeout-close-wait",
 		o.config.Conntrack.TCPCloseWaitTimeout.Duration,
 		"NAT timeout for TCP connections in the CLOSE_WAIT state")
+	fs.BoolVar(&o.config.Conntrack.TCPBeLiberal, "conntrack-tcp-be-liberal", o.config.Conntrack.TCPBeLiberal, "Enable liberal mode for tracking TCP packets by setting nf_conntrack_tcp_be_liberal to 1")
 	fs.DurationVar(&o.config.Conntrack.UDPTimeout.Duration, "conntrack-udp-timeout", o.config.Conntrack.UDPTimeout.Duration, "Idle timeout for UNREPLIED UDP connections (0 to leave as-is)")
 	fs.DurationVar(&o.config.Conntrack.UDPStreamTimeout.Duration, "conntrack-udp-timeout-stream", o.config.Conntrack.UDPStreamTimeout.Duration, "Idle timeout for ASSURED UDP connections (0 to leave as-is)")
 
@@ -372,13 +375,19 @@ func (o *Options) Run() error {
 		return o.writeConfigFile()
 	}
 
+	err := platformCleanup(o.config.Mode, o.CleanupAndExit)
 	if o.CleanupAndExit {
-		return cleanupAndExit()
+		return err
 	}
+	// We ignore err otherwise; the cleanup is best-effort, and the backends will have
+	// logged messages if they failed in interesting ways.
 
-	proxyServer, err := newProxyServer(o.config, o.master)
+	proxyServer, err := newProxyServer(o.config, o.master, o.InitAndExit)
 	if err != nil {
 		return err
+	}
+	if o.InitAndExit {
+		return nil
 	}
 
 	o.proxyServer = proxyServer
@@ -589,7 +598,7 @@ type ProxyServer struct {
 }
 
 // newProxyServer creates a ProxyServer based on the given config
-func newProxyServer(config *kubeproxyconfig.KubeProxyConfiguration, master string) (*ProxyServer, error) {
+func newProxyServer(config *kubeproxyconfig.KubeProxyConfiguration, master string, initOnly bool) (*ProxyServer, error) {
 	s := &ProxyServer{Config: config}
 
 	cz, err := configz.New(kubeproxyconfig.GroupName)
@@ -653,7 +662,7 @@ func newProxyServer(config *kubeproxyconfig.KubeProxyConfiguration, master strin
 		klog.ErrorS(err, "Kube-proxy configuration may be incomplete or incorrect")
 	}
 
-	s.Proxier, err = s.createProxier(config, dualStackSupported)
+	s.Proxier, err = s.createProxier(config, dualStackSupported, initOnly)
 	if err != nil {
 		return nil, err
 	}
