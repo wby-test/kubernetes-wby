@@ -1,3 +1,6 @@
+//go:build linux
+// +build linux
+
 /*
 Copyright 2015 The Kubernetes Authors.
 
@@ -20,8 +23,6 @@ import (
 	"fmt"
 	"net"
 	"reflect"
-	"sort"
-	"strings"
 	"testing"
 	"time"
 
@@ -32,10 +33,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/component-base/metrics/testutil"
-	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/proxy"
 	"k8s.io/kubernetes/pkg/proxy/conntrack"
@@ -46,212 +47,9 @@ import (
 	proxyutiliptables "k8s.io/kubernetes/pkg/proxy/util/iptables"
 	proxyutiltest "k8s.io/kubernetes/pkg/proxy/util/testing"
 	"k8s.io/kubernetes/pkg/util/async"
-	"k8s.io/utils/exec"
-	fakeexec "k8s.io/utils/exec/testing"
 	netutils "k8s.io/utils/net"
 	"k8s.io/utils/ptr"
 )
-
-func TestDeleteEndpointConnections(t *testing.T) {
-	const (
-		UDP  = v1.ProtocolUDP
-		TCP  = v1.ProtocolTCP
-		SCTP = v1.ProtocolSCTP
-	)
-
-	testCases := []struct {
-		description  string
-		svcName      string
-		svcIP        string
-		svcPort      int32
-		protocol     v1.Protocol
-		endpoint     string // IP:port endpoint
-		simulatedErr string
-	}{
-		{
-			description: "V4 UDP",
-			svcName:     "v4-udp",
-			svcIP:       "172.30.1.1",
-			svcPort:     80,
-			protocol:    UDP,
-			endpoint:    "10.240.0.3:80",
-		},
-		{
-			description: "V4 TCP",
-			svcName:     "v4-tcp",
-			svcIP:       "172.30.2.2",
-			svcPort:     80,
-			protocol:    TCP,
-			endpoint:    "10.240.0.4:80",
-		},
-		{
-			description: "V4 SCTP",
-			svcName:     "v4-sctp",
-			svcIP:       "172.30.3.3",
-			svcPort:     80,
-			protocol:    SCTP,
-			endpoint:    "10.240.0.5:80",
-		},
-		{
-			description:  "V4 UDP, nothing to delete, benign error",
-			svcName:      "v4-udp-nothing-to-delete",
-			svcIP:        "172.30.4.4",
-			svcPort:      80,
-			protocol:     UDP,
-			endpoint:     "10.240.0.6:80",
-			simulatedErr: conntrack.NoConnectionToDelete,
-		},
-		{
-			description:  "V4 UDP, unexpected error, should be glogged",
-			svcName:      "v4-udp-simulated-error",
-			svcIP:        "172.30.5.5",
-			svcPort:      80,
-			protocol:     UDP,
-			endpoint:     "10.240.0.7:80",
-			simulatedErr: "simulated error",
-		},
-		{
-			description: "V6 UDP",
-			svcName:     "v6-udp",
-			svcIP:       "fd00:1234::20",
-			svcPort:     80,
-			protocol:    UDP,
-			endpoint:    "[2001:db8::2]:80",
-		},
-		{
-			description: "V6 TCP",
-			svcName:     "v6-tcp",
-			svcIP:       "fd00:1234::30",
-			svcPort:     80,
-			protocol:    TCP,
-			endpoint:    "[2001:db8::3]:80",
-		},
-		{
-			description: "V6 SCTP",
-			svcName:     "v6-sctp",
-			svcIP:       "fd00:1234::40",
-			svcPort:     80,
-			protocol:    SCTP,
-			endpoint:    "[2001:db8::4]:80",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.description, func(t *testing.T) {
-			priorGlogErrs := klog.Stats.Error.Lines()
-
-			// Create a fake executor for the conntrack utility.
-			fcmd := fakeexec.FakeCmd{}
-			fexec := &fakeexec.FakeExec{
-				LookPathFunc: func(cmd string) (string, error) { return cmd, nil },
-			}
-			execFunc := func(cmd string, args ...string) exec.Cmd {
-				return fakeexec.InitFakeCmd(&fcmd, cmd, args...)
-			}
-
-			if tc.protocol == UDP {
-				cmdOutput := "1 flow entries have been deleted"
-				var simErr error
-
-				// First call outputs cmdOutput and succeeds
-				fcmd.CombinedOutputScript = append(fcmd.CombinedOutputScript,
-					func() ([]byte, []byte, error) { return []byte(cmdOutput), nil, nil },
-				)
-				fexec.CommandScript = append(fexec.CommandScript, execFunc)
-
-				// Second call may succeed or fail
-				if tc.simulatedErr != "" {
-					cmdOutput = ""
-					simErr = fmt.Errorf(tc.simulatedErr)
-				}
-				fcmd.CombinedOutputScript = append(fcmd.CombinedOutputScript,
-					func() ([]byte, []byte, error) { return []byte(cmdOutput), nil, simErr },
-				)
-				fexec.CommandScript = append(fexec.CommandScript, execFunc)
-			}
-
-			endpointIP := proxyutil.IPPart(tc.endpoint)
-			_, fp := NewFakeProxier(proxyutil.GetIPFamilyFromIP(endpointIP))
-			fp.exec = fexec
-
-			makeServiceMap(fp,
-				makeTestService("ns1", tc.svcName, func(svc *v1.Service) {
-					svc.Spec.ClusterIP = tc.svcIP
-					svc.Spec.Ports = []v1.ServicePort{{
-						Name:     "p80",
-						Port:     tc.svcPort,
-						Protocol: tc.protocol,
-					}}
-					svc.Spec.ExternalTrafficPolicy = v1.ServiceExternalTrafficPolicyLocal
-				}),
-			)
-			fp.svcPortMap.Update(fp.serviceChanges)
-
-			slice := makeTestEndpointSlice("ns1", tc.svcName, 1, func(eps *discovery.EndpointSlice) {
-				if fp.ipFamily == v1.IPv6Protocol {
-					eps.AddressType = discovery.AddressTypeIPv6
-				} else {
-					eps.AddressType = discovery.AddressTypeIPv4
-				}
-				eps.Endpoints = []discovery.Endpoint{{
-					Addresses: []string{endpointIP},
-				}}
-				eps.Ports = []discovery.EndpointPort{{
-					Name:     ptr.To("p80"),
-					Port:     ptr.To[int32](80),
-					Protocol: ptr.To(tc.protocol),
-				}}
-			})
-
-			// Add and then remove the endpoint slice
-			fp.OnEndpointSliceAdd(slice)
-			fp.syncProxyRules()
-			fp.OnEndpointSliceDelete(slice)
-			fp.syncProxyRules()
-
-			// Check the executed conntrack command
-			if tc.protocol == UDP {
-				if fexec.CommandCalls != 2 {
-					t.Fatalf("Expected conntrack to be executed 2 times, but got %d", fexec.CommandCalls)
-				}
-
-				// First clear conntrack entries for the clusterIP when the
-				// endpoint is first added.
-				expectCommand := fmt.Sprintf("conntrack -D --orig-dst %s -p udp", tc.svcIP)
-				if fp.ipFamily == v1.IPv6Protocol {
-					expectCommand += " -f ipv6"
-				}
-				actualCommand := strings.Join(fcmd.CombinedOutputLog[0], " ")
-				if actualCommand != expectCommand {
-					t.Errorf("Expected command: %s, but executed %s", expectCommand, actualCommand)
-				}
-
-				// Then clear conntrack entries for the endpoint when it is
-				// deleted.
-				expectCommand = fmt.Sprintf("conntrack -D --orig-dst %s --dst-nat %s -p udp", tc.svcIP, endpointIP)
-				if fp.ipFamily == v1.IPv6Protocol {
-					expectCommand += " -f ipv6"
-				}
-				actualCommand = strings.Join(fcmd.CombinedOutputLog[1], " ")
-				if actualCommand != expectCommand {
-					t.Errorf("Expected command: %s, but executed %s", expectCommand, actualCommand)
-				}
-			} else if fexec.CommandCalls != 0 {
-				t.Fatalf("Expected conntrack to be executed 0 times, but got %d", fexec.CommandCalls)
-			}
-
-			// Check the number of new glog errors
-			var expGlogErrs int64
-			if tc.simulatedErr != "" && tc.simulatedErr != conntrack.NoConnectionToDelete {
-				expGlogErrs = 1
-			}
-			glogErrs := klog.Stats.Error.Lines() - priorGlogErrs
-			if glogErrs != expGlogErrs {
-				t.Errorf("Expected %d glogged errors, but got %d", expGlogErrs, glogErrs)
-			}
-		})
-	}
-}
 
 // Conventions for tests using NewFakeProxier:
 //
@@ -307,13 +105,13 @@ func NewFakeProxier(ipFamily v1.IPFamily) (*knftables.Fake, *Proxier) {
 
 	p := &Proxier{
 		ipFamily:            ipFamily,
-		exec:                &fakeexec.FakeExec{},
 		svcPortMap:          make(proxy.ServicePortMap),
 		serviceChanges:      proxy.NewServiceChangeTracker(newServiceInfo, ipFamily, nil, nil),
 		endpointsMap:        make(proxy.EndpointsMap),
 		endpointsChanges:    proxy.NewEndpointsChangeTracker(testHostname, newEndpointInfo, ipFamily, nil, nil),
 		nftables:            nft,
 		masqueradeMark:      "0x4000",
+		conntrack:           conntrack.NewFake(),
 		localDetector:       detectLocal,
 		hostname:            testHostname,
 		serviceHealthServer: healthcheck.NewFakeServiceHealthServer(),
@@ -495,8 +293,6 @@ func TestOverallNFTablesRules(t *testing.T) {
 	expected := dedent.Dedent(`
 		add table ip kube-proxy { comment "rules for kube-proxy" ; }
 
-		add chain ip kube-proxy forward
-		add rule ip kube-proxy forward ct state invalid drop
 		add chain ip kube-proxy mark-for-masquerade
 		add rule ip kube-proxy mark-for-masquerade mark set mark or 0x4000
 		add chain ip kube-proxy masquerading
@@ -504,14 +300,13 @@ func TestOverallNFTablesRules(t *testing.T) {
 		add rule ip kube-proxy masquerading mark set mark xor 0x4000
 		add rule ip kube-proxy masquerading masquerade fully-random
 		add chain ip kube-proxy services
-		add chain ip kube-proxy filter-forward { type filter hook forward priority -101 ; }
+		add chain ip kube-proxy filter-prerouting { type filter hook prerouting priority -110 ; }
+		add rule ip kube-proxy filter-prerouting ct state new jump firewall-check
+		add chain ip kube-proxy filter-forward { type filter hook forward priority -110 ; }
 		add rule ip kube-proxy filter-forward ct state new jump endpoints-check
-		add rule ip kube-proxy filter-forward jump forward
-		add rule ip kube-proxy filter-forward ct state new jump firewall-check
-		add chain ip kube-proxy filter-input { type filter hook input priority -101 ; }
+		add chain ip kube-proxy filter-input { type filter hook input priority -110 ; }
 		add rule ip kube-proxy filter-input ct state new jump endpoints-check
-		add rule ip kube-proxy filter-input ct state new jump firewall-check
-		add chain ip kube-proxy filter-output { type filter hook output priority -101 ; }
+		add chain ip kube-proxy filter-output { type filter hook output priority -110 ; }
 		add rule ip kube-proxy filter-output ct state new jump endpoints-check
 		add rule ip kube-proxy filter-output ct state new jump firewall-check
 		add chain ip kube-proxy nat-output { type nat hook output priority -100 ; }
@@ -521,13 +316,9 @@ func TestOverallNFTablesRules(t *testing.T) {
 		add chain ip kube-proxy nat-prerouting { type nat hook prerouting priority -100 ; }
 		add rule ip kube-proxy nat-prerouting jump services
 
-		add set ip kube-proxy firewall { type ipv4_addr . inet_proto . inet_service ; comment "destinations that are subject to LoadBalancerSourceRanges" ; }
-		add set ip kube-proxy firewall-allow { type ipv4_addr . inet_proto . inet_service . ipv4_addr ; flags interval ; comment "destinations+sources that are allowed by LoadBalancerSourceRanges" ; }
+		add map ip kube-proxy firewall-ips { type ipv4_addr . inet_proto . inet_service : verdict ; comment "destinations that are subject to LoadBalancerSourceRanges" ; }
 		add chain ip kube-proxy firewall-check
-		add chain ip kube-proxy firewall-allow-check
-		add rule ip kube-proxy firewall-allow-check ip daddr . meta l4proto . th dport . ip saddr @firewall-allow return
-		add rule ip kube-proxy firewall-allow-check drop
-		add rule ip kube-proxy firewall-check ip daddr . meta l4proto . th dport @firewall jump firewall-allow-check
+		add rule ip kube-proxy firewall-check ip daddr . meta l4proto . th dport vmap @firewall-ips
 
 		add chain ip kube-proxy reject-chain { comment "helper for @no-endpoint-services / @no-endpoint-nodeports" ; }
 		add rule ip kube-proxy reject-chain reject
@@ -622,11 +413,13 @@ func TestOverallNFTablesRules(t *testing.T) {
 		add rule ip kube-proxy endpoint-GTK6MW7G-ns5/svc5/tcp/p80__10.180.0.3/80 update @affinity-GTK6MW7G-ns5/svc5/tcp/p80__10.180.0.3/80 { ip saddr }
 		add rule ip kube-proxy endpoint-GTK6MW7G-ns5/svc5/tcp/p80__10.180.0.3/80 meta l4proto tcp dnat to 10.180.0.3:80
 
+		add chain ip kube-proxy firewall-HVFWP5L3-ns5/svc5/tcp/p80
+		add rule ip kube-proxy firewall-HVFWP5L3-ns5/svc5/tcp/p80 ip saddr != { 203.0.113.0/25 } drop
+
 		add element ip kube-proxy service-ips { 172.30.0.45 . tcp . 80 : goto service-HVFWP5L3-ns5/svc5/tcp/p80 }
 		add element ip kube-proxy service-ips { 5.6.7.8 . tcp . 80 : goto external-HVFWP5L3-ns5/svc5/tcp/p80 }
 		add element ip kube-proxy service-nodeports { tcp . 3002 : goto external-HVFWP5L3-ns5/svc5/tcp/p80 }
-		add element ip kube-proxy firewall { 5.6.7.8 . tcp . 80 comment "ns5/svc5:p80" }
-		add element ip kube-proxy firewall-allow { 5.6.7.8 . tcp . 80 . 203.0.113.0/25 comment "ns5/svc5:p80" }
+		add element ip kube-proxy firewall-ips { 5.6.7.8 . tcp . 80 comment "ns5/svc5:p80" : goto firewall-HVFWP5L3-ns5/svc5/tcp/p80 }
 
 		# svc6
 		add element ip kube-proxy no-endpoint-services { 172.30.0.46 . tcp . 80 comment "ns6/svc6:p80" : goto reject-chain }
@@ -741,21 +534,22 @@ func TestClusterIPGeneral(t *testing.T) {
 					TargetPort: intstr.FromInt32(8443),
 				},
 				{
-					// Of course this should really be UDP, but if we
-					// create a service with UDP ports, the Proxier will
-					// try to do conntrack cleanup and we'd have to set
-					// the FakeExec up to be able to deal with that...
-					Name:     "dns-sctp",
+					Name:     "dns-udp",
 					Port:     53,
-					Protocol: v1.ProtocolSCTP,
+					Protocol: v1.ProtocolUDP,
 				},
 				{
 					Name:     "dns-tcp",
 					Port:     53,
 					Protocol: v1.ProtocolTCP,
-					// We use TargetPort on TCP but not SCTP to help
-					// disambiguate the output.
+					// We use TargetPort on TCP but not UDP/SCTP to
+					// help disambiguate the output.
 					TargetPort: intstr.FromInt32(5353),
+				},
+				{
+					Name:     "dns-sctp",
+					Port:     53,
+					Protocol: v1.ProtocolSCTP,
 				},
 			}
 		}),
@@ -798,14 +592,19 @@ func TestClusterIPGeneral(t *testing.T) {
 					Protocol: ptr.To(v1.ProtocolTCP),
 				},
 				{
-					Name:     ptr.To("dns-sctp"),
+					Name:     ptr.To("dns-udp"),
 					Port:     ptr.To[int32](53),
-					Protocol: ptr.To(v1.ProtocolSCTP),
+					Protocol: ptr.To(v1.ProtocolUDP),
 				},
 				{
 					Name:     ptr.To("dns-tcp"),
 					Port:     ptr.To[int32](5353),
 					Protocol: ptr.To(v1.ProtocolTCP),
+				},
+				{
+					Name:     ptr.To("dns-sctp"),
+					Port:     ptr.To[int32](53),
+					Protocol: ptr.To(v1.ProtocolSCTP),
 				},
 			}
 		}),
@@ -847,7 +646,7 @@ func TestClusterIPGeneral(t *testing.T) {
 			masq:     false,
 		},
 		{
-			name:     "clusterIP with TCP and SCTP on same port (TCP)",
+			name:     "clusterIP with TCP, UDP, and SCTP on same port (TCP)",
 			sourceIP: "10.180.0.2",
 			protocol: v1.ProtocolTCP,
 			destIP:   "172.30.0.42",
@@ -856,7 +655,16 @@ func TestClusterIPGeneral(t *testing.T) {
 			masq:     false,
 		},
 		{
-			name:     "clusterIP with TCP and SCTP on same port (SCTP)",
+			name:     "clusterIP with TCP, UDP, and SCTP on same port (TCP)",
+			sourceIP: "10.180.0.2",
+			protocol: v1.ProtocolUDP,
+			destIP:   "172.30.0.42",
+			destPort: 53,
+			output:   "10.180.0.1:53, 10.180.2.1:53",
+			masq:     false,
+		},
+		{
+			name:     "clusterIP with TCP, UDP, and SCTP on same port (SCTP)",
 			sourceIP: "10.180.0.2",
 			protocol: v1.ProtocolSCTP,
 			destIP:   "172.30.0.42",
@@ -1220,23 +1028,6 @@ func TestNodePorts(t *testing.T) {
 					},
 				})
 			}
-		})
-	}
-}
-
-func TestDropInvalidRule(t *testing.T) {
-	for _, tcpLiberal := range []bool{false, true} {
-		t.Run(fmt.Sprintf("tcpLiberal %t", tcpLiberal), func(t *testing.T) {
-			nft, fp := NewFakeProxier(v1.IPv4Protocol)
-			fp.conntrackTCPLiberal = tcpLiberal
-			fp.syncProxyRules()
-
-			var expected string
-			if !tcpLiberal {
-				expected = "ct state invalid drop"
-			}
-
-			assertNFTablesChainEqual(t, getLine(), nft, kubeForwardChain, expected)
 		})
 	}
 }
@@ -2755,138 +2546,6 @@ func TestHealthCheckNodePortWhenTerminating(t *testing.T) {
 	}
 }
 
-func TestProxierDeleteNodePortStaleUDP(t *testing.T) {
-	fcmd := fakeexec.FakeCmd{}
-	fexec := &fakeexec.FakeExec{
-		LookPathFunc: func(cmd string) (string, error) { return cmd, nil },
-	}
-	execFunc := func(cmd string, args ...string) exec.Cmd {
-		return fakeexec.InitFakeCmd(&fcmd, cmd, args...)
-	}
-	cmdOutput := "1 flow entries have been deleted"
-	cmdFunc := func() ([]byte, []byte, error) { return []byte(cmdOutput), nil, nil }
-
-	// Delete ClusterIP entries
-	fcmd.CombinedOutputScript = append(fcmd.CombinedOutputScript, cmdFunc)
-	fexec.CommandScript = append(fexec.CommandScript, execFunc)
-	// Delete ExternalIP entries
-	fcmd.CombinedOutputScript = append(fcmd.CombinedOutputScript, cmdFunc)
-	fexec.CommandScript = append(fexec.CommandScript, execFunc)
-	// Delete LoadBalancerIP entries
-	fcmd.CombinedOutputScript = append(fcmd.CombinedOutputScript, cmdFunc)
-	fexec.CommandScript = append(fexec.CommandScript, execFunc)
-	// Delete NodePort entries
-	fcmd.CombinedOutputScript = append(fcmd.CombinedOutputScript, cmdFunc)
-	fexec.CommandScript = append(fexec.CommandScript, execFunc)
-
-	_, fp := NewFakeProxier(v1.IPv4Protocol)
-	fp.exec = fexec
-
-	svcIP := "172.30.0.41"
-	extIP := "192.168.99.11"
-	lbIngressIP := "1.2.3.4"
-	svcPort := 80
-	nodePort := 31201
-	svcPortName := proxy.ServicePortName{
-		NamespacedName: makeNSN("ns1", "svc1"),
-		Port:           "p80",
-		Protocol:       v1.ProtocolUDP,
-	}
-
-	makeServiceMap(fp,
-		makeTestService(svcPortName.Namespace, svcPortName.Name, func(svc *v1.Service) {
-			svc.Spec.ClusterIP = svcIP
-			svc.Spec.ExternalIPs = []string{extIP}
-			svc.Spec.Type = "LoadBalancer"
-			svc.Spec.Ports = []v1.ServicePort{{
-				Name:     svcPortName.Port,
-				Port:     int32(svcPort),
-				Protocol: v1.ProtocolUDP,
-				NodePort: int32(nodePort),
-			}}
-			svc.Status.LoadBalancer.Ingress = []v1.LoadBalancerIngress{{
-				IP: lbIngressIP,
-			}}
-		}),
-	)
-
-	fp.syncProxyRules()
-	if fexec.CommandCalls != 0 {
-		t.Fatalf("Created service without endpoints must not clear conntrack entries")
-	}
-
-	epIP := "10.180.0.1"
-	populateEndpointSlices(fp,
-		makeTestEndpointSlice(svcPortName.Namespace, svcPortName.Name, 1, func(eps *discovery.EndpointSlice) {
-			eps.AddressType = discovery.AddressTypeIPv4
-			eps.Endpoints = []discovery.Endpoint{{
-				Addresses: []string{epIP},
-				Conditions: discovery.EndpointConditions{
-					Serving: ptr.To(false),
-				},
-			}}
-			eps.Ports = []discovery.EndpointPort{{
-				Name:     ptr.To(svcPortName.Port),
-				Port:     ptr.To(int32(svcPort)),
-				Protocol: ptr.To(v1.ProtocolUDP),
-			}}
-		}),
-	)
-
-	fp.syncProxyRules()
-
-	if fexec.CommandCalls != 0 {
-		t.Fatalf("Updated UDP service with not ready endpoints must not clear UDP entries")
-	}
-
-	populateEndpointSlices(fp,
-		makeTestEndpointSlice(svcPortName.Namespace, svcPortName.Name, 1, func(eps *discovery.EndpointSlice) {
-			eps.AddressType = discovery.AddressTypeIPv4
-			eps.Endpoints = []discovery.Endpoint{{
-				Addresses: []string{epIP},
-				Conditions: discovery.EndpointConditions{
-					Serving: ptr.To(true),
-				},
-			}}
-			eps.Ports = []discovery.EndpointPort{{
-				Name:     ptr.To(svcPortName.Port),
-				Port:     ptr.To(int32(svcPort)),
-				Protocol: ptr.To(v1.ProtocolUDP),
-			}}
-		}),
-	)
-
-	fp.syncProxyRules()
-
-	if fexec.CommandCalls != 4 {
-		t.Fatalf("Updated UDP service with new endpoints must clear UDP entries 4 times: ClusterIP, NodePort, ExternalIP and LB")
-	}
-
-	// the order is not guaranteed so we have to compare the strings in any order
-	expectedCommands := []string{
-		// Delete ClusterIP Conntrack entries
-		fmt.Sprintf("conntrack -D --orig-dst %s -p %s", svcIP, strings.ToLower(string((v1.ProtocolUDP)))),
-		// Delete ExternalIP Conntrack entries
-		fmt.Sprintf("conntrack -D --orig-dst %s -p %s", extIP, strings.ToLower(string((v1.ProtocolUDP)))),
-		// Delete LoadBalancerIP Conntrack entries
-		fmt.Sprintf("conntrack -D --orig-dst %s -p %s", lbIngressIP, strings.ToLower(string((v1.ProtocolUDP)))),
-		// Delete NodePort Conntrack entrie
-		fmt.Sprintf("conntrack -D -p %s --dport %d", strings.ToLower(string((v1.ProtocolUDP))), nodePort),
-	}
-	actualCommands := []string{
-		strings.Join(fcmd.CombinedOutputLog[0], " "),
-		strings.Join(fcmd.CombinedOutputLog[1], " "),
-		strings.Join(fcmd.CombinedOutputLog[2], " "),
-		strings.Join(fcmd.CombinedOutputLog[3], " "),
-	}
-	sort.Strings(expectedCommands)
-	sort.Strings(actualCommands)
-
-	if !reflect.DeepEqual(expectedCommands, actualCommands) {
-		t.Errorf("Expected commands: %v, but executed %v", expectedCommands, actualCommands)
-	}
-}
-
 // TODO(thockin): add *more* tests for syncProxyRules() or break it down further and test the pieces.
 
 // This test ensures that the iptables proxier supports translating Endpoints to
@@ -4261,12 +3920,11 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		add table ip kube-proxy { comment "rules for kube-proxy" ; }
 
 		add chain ip kube-proxy endpoints-check
-		add chain ip kube-proxy filter-forward { type filter hook forward priority -101 ; }
-		add chain ip kube-proxy filter-input { type filter hook input priority -101 ; }
-		add chain ip kube-proxy filter-output { type filter hook output priority -101 ; }
-		add chain ip kube-proxy firewall-allow-check
+		add chain ip kube-proxy filter-prerouting { type filter hook prerouting priority -110 ; }
+		add chain ip kube-proxy filter-forward { type filter hook forward priority -110 ; }
+		add chain ip kube-proxy filter-input { type filter hook input priority -110 ; }
+		add chain ip kube-proxy filter-output { type filter hook output priority -110 ; }
 		add chain ip kube-proxy firewall-check
-		add chain ip kube-proxy forward
 		add chain ip kube-proxy mark-for-masquerade
 		add chain ip kube-proxy masquerading
 		add chain ip kube-proxy nat-output { type nat hook output priority -100 ; }
@@ -4277,17 +3935,12 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 
 		add rule ip kube-proxy endpoints-check ip daddr . meta l4proto . th dport vmap @no-endpoint-services
 		add rule ip kube-proxy endpoints-check fib daddr type local ip daddr != 127.0.0.0/8 meta l4proto . th dport vmap @no-endpoint-nodeports
+		add rule ip kube-proxy filter-prerouting ct state new jump firewall-check
 		add rule ip kube-proxy filter-forward ct state new jump endpoints-check
-		add rule ip kube-proxy filter-forward jump forward
-		add rule ip kube-proxy filter-forward ct state new jump firewall-check
 		add rule ip kube-proxy filter-input ct state new jump endpoints-check
-		add rule ip kube-proxy filter-input ct state new jump firewall-check
 		add rule ip kube-proxy filter-output ct state new jump endpoints-check
 		add rule ip kube-proxy filter-output ct state new jump firewall-check
-		add rule ip kube-proxy firewall-allow-check ip daddr . meta l4proto . th dport . ip saddr @firewall-allow return
-		add rule ip kube-proxy firewall-allow-check drop
-		add rule ip kube-proxy firewall-check ip daddr . meta l4proto . th dport @firewall jump firewall-allow-check
-		add rule ip kube-proxy forward ct state invalid drop
+		add rule ip kube-proxy firewall-check ip daddr . meta l4proto . th dport vmap @firewall-ips
 		add rule ip kube-proxy mark-for-masquerade mark set mark or 0x4000
 		add rule ip kube-proxy masquerading mark and 0x4000 == 0 return
 		add rule ip kube-proxy masquerading mark set mark xor 0x4000
@@ -4299,8 +3952,7 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		add rule ip kube-proxy services ip daddr . meta l4proto . th dport vmap @service-ips
 		add rule ip kube-proxy services fib daddr type local ip daddr != 127.0.0.0/8 meta l4proto . th dport vmap @service-nodeports
 
-		add set ip kube-proxy firewall { type ipv4_addr . inet_proto . inet_service ; comment "destinations that are subject to LoadBalancerSourceRanges" ; }
-		add set ip kube-proxy firewall-allow { type ipv4_addr . inet_proto . inet_service . ipv4_addr ; flags interval ; comment "destinations+sources that are allowed by LoadBalancerSourceRanges" ; }
+		add map ip kube-proxy firewall-ips { type ipv4_addr . inet_proto . inet_service : verdict ; comment "destinations that are subject to LoadBalancerSourceRanges" ; }
 		add map ip kube-proxy no-endpoint-nodeports { type inet_proto . inet_service : verdict ; comment "vmap to drop or reject packets to service nodeports with no endpoints" ; }
 		add map ip kube-proxy no-endpoint-services { type ipv4_addr . inet_proto . inet_service : verdict ; comment "vmap to drop or reject packets to services with no endpoints" ; }
 		add map ip kube-proxy service-ips { type ipv4_addr . inet_proto . inet_service : verdict ; comment "ClusterIP, ExternalIP and LoadBalancer IP traffic" ; }
@@ -4644,6 +4296,88 @@ func TestSyncProxyRulesRepeated(t *testing.T) {
 		add rule ip kube-proxy endpoint-WAHRBT2B-ns4/svc4/tcp/p80__10.0.4.1/80 ip saddr 10.0.4.1 jump mark-for-masquerade
 		add rule ip kube-proxy endpoint-WAHRBT2B-ns4/svc4/tcp/p80__10.0.4.1/80 meta l4proto tcp dnat to 10.0.4.1:80
 		`)
+	assertNFTablesTransactionEqual(t, getLine(), expected, nft.Dump())
+
+	// Empty a service's endpoints; its chains will be flushed, but not immediately deleted.
+	eps3update3 := eps3update2.DeepCopy()
+	eps3update3.Endpoints = []discovery.Endpoint{}
+	fp.OnEndpointSliceUpdate(eps3update2, eps3update3)
+	fp.syncProxyRules()
+	expected = baseRules + dedent.Dedent(`
+		add element ip kube-proxy service-ips { 172.30.0.41 . tcp . 80 : goto service-ULMVA6XW-ns1/svc1/tcp/p80 }
+		add element ip kube-proxy no-endpoint-services { 172.30.0.43 . tcp . 80 comment "ns3/svc3:p80" : goto reject-chain }
+		add element ip kube-proxy service-ips { 172.30.0.44 . tcp . 80 : goto service-LAUZTJTB-ns4/svc4/tcp/p80 }
+
+		add chain ip kube-proxy service-ULMVA6XW-ns1/svc1/tcp/p80
+		add rule ip kube-proxy service-ULMVA6XW-ns1/svc1/tcp/p80 ip daddr 172.30.0.41 tcp dport 80 ip saddr != 10.0.0.0/8 jump mark-for-masquerade
+		add rule ip kube-proxy service-ULMVA6XW-ns1/svc1/tcp/p80 numgen random mod 1 vmap { 0 : goto endpoint-5TPGNJF2-ns1/svc1/tcp/p80__10.0.1.1/80 }
+		add chain ip kube-proxy endpoint-5TPGNJF2-ns1/svc1/tcp/p80__10.0.1.1/80
+		add rule ip kube-proxy endpoint-5TPGNJF2-ns1/svc1/tcp/p80__10.0.1.1/80 ip saddr 10.0.1.1 jump mark-for-masquerade
+		add rule ip kube-proxy endpoint-5TPGNJF2-ns1/svc1/tcp/p80__10.0.1.1/80 meta l4proto tcp dnat to 10.0.1.1:80
+
+		add chain ip kube-proxy service-4AT6LBPK-ns3/svc3/tcp/p80
+		add chain ip kube-proxy endpoint-SWWHDC7X-ns3/svc3/tcp/p80__10.0.3.2/80
+		add chain ip kube-proxy endpoint-TQ2QKHCZ-ns3/svc3/tcp/p80__10.0.3.3/80
+
+		add chain ip kube-proxy service-LAUZTJTB-ns4/svc4/tcp/p80
+		add rule ip kube-proxy service-LAUZTJTB-ns4/svc4/tcp/p80 ip daddr 172.30.0.44 tcp dport 80 ip saddr != 10.0.0.0/8 jump mark-for-masquerade
+		add rule ip kube-proxy service-LAUZTJTB-ns4/svc4/tcp/p80 numgen random mod 1 vmap { 0 : goto endpoint-WAHRBT2B-ns4/svc4/tcp/p80__10.0.4.1/80 }
+		add chain ip kube-proxy endpoint-WAHRBT2B-ns4/svc4/tcp/p80__10.0.4.1/80
+		add rule ip kube-proxy endpoint-WAHRBT2B-ns4/svc4/tcp/p80__10.0.4.1/80 ip saddr 10.0.4.1 jump mark-for-masquerade
+		add rule ip kube-proxy endpoint-WAHRBT2B-ns4/svc4/tcp/p80__10.0.4.1/80 meta l4proto tcp dnat to 10.0.4.1:80
+		`)
+	assertNFTablesTransactionEqual(t, getLine(), expected, nft.Dump())
+	expectedStaleChains := sets.NewString("service-4AT6LBPK-ns3/svc3/tcp/p80", "endpoint-SWWHDC7X-ns3/svc3/tcp/p80__10.0.3.2/80", "endpoint-TQ2QKHCZ-ns3/svc3/tcp/p80__10.0.3.3/80")
+	gotStaleChains := sets.StringKeySet(fp.staleChains)
+	if !expectedStaleChains.Equal(gotStaleChains) {
+		t.Errorf("expected stale chains %v, got %v", expectedStaleChains, gotStaleChains)
+	}
+	// Restore endpoints to non-empty immediately; its chains will be restored, and deleted from staleChains.
+	fp.OnEndpointSliceUpdate(eps3update3, eps3update2)
+	fp.syncProxyRules()
+	expected = baseRules + dedent.Dedent(`
+		add element ip kube-proxy service-ips { 172.30.0.41 . tcp . 80 : goto service-ULMVA6XW-ns1/svc1/tcp/p80 }
+		add element ip kube-proxy service-ips { 172.30.0.43 . tcp . 80 : goto service-4AT6LBPK-ns3/svc3/tcp/p80 }
+		add element ip kube-proxy service-ips { 172.30.0.44 . tcp . 80 : goto service-LAUZTJTB-ns4/svc4/tcp/p80 }
+
+		add chain ip kube-proxy service-ULMVA6XW-ns1/svc1/tcp/p80
+		add rule ip kube-proxy service-ULMVA6XW-ns1/svc1/tcp/p80 ip daddr 172.30.0.41 tcp dport 80 ip saddr != 10.0.0.0/8 jump mark-for-masquerade
+		add rule ip kube-proxy service-ULMVA6XW-ns1/svc1/tcp/p80 numgen random mod 1 vmap { 0 : goto endpoint-5TPGNJF2-ns1/svc1/tcp/p80__10.0.1.1/80 }
+		add chain ip kube-proxy endpoint-5TPGNJF2-ns1/svc1/tcp/p80__10.0.1.1/80
+		add rule ip kube-proxy endpoint-5TPGNJF2-ns1/svc1/tcp/p80__10.0.1.1/80 ip saddr 10.0.1.1 jump mark-for-masquerade
+		add rule ip kube-proxy endpoint-5TPGNJF2-ns1/svc1/tcp/p80__10.0.1.1/80 meta l4proto tcp dnat to 10.0.1.1:80
+
+		add chain ip kube-proxy service-4AT6LBPK-ns3/svc3/tcp/p80
+		add rule ip kube-proxy service-4AT6LBPK-ns3/svc3/tcp/p80 ip daddr 172.30.0.43 tcp dport 80 ip saddr != 10.0.0.0/8 jump mark-for-masquerade
+		add rule ip kube-proxy service-4AT6LBPK-ns3/svc3/tcp/p80 numgen random mod 2 vmap { 0 : goto endpoint-SWWHDC7X-ns3/svc3/tcp/p80__10.0.3.2/80 , 1 : goto endpoint-TQ2QKHCZ-ns3/svc3/tcp/p80__10.0.3.3/80 }
+		add chain ip kube-proxy endpoint-SWWHDC7X-ns3/svc3/tcp/p80__10.0.3.2/80
+		add rule ip kube-proxy endpoint-SWWHDC7X-ns3/svc3/tcp/p80__10.0.3.2/80 ip saddr 10.0.3.2 jump mark-for-masquerade
+		add rule ip kube-proxy endpoint-SWWHDC7X-ns3/svc3/tcp/p80__10.0.3.2/80 meta l4proto tcp dnat to 10.0.3.2:80
+		add chain ip kube-proxy endpoint-TQ2QKHCZ-ns3/svc3/tcp/p80__10.0.3.3/80
+		add rule ip kube-proxy endpoint-TQ2QKHCZ-ns3/svc3/tcp/p80__10.0.3.3/80 ip saddr 10.0.3.3 jump mark-for-masquerade
+		add rule ip kube-proxy endpoint-TQ2QKHCZ-ns3/svc3/tcp/p80__10.0.3.3/80 meta l4proto tcp dnat to 10.0.3.3:80
+
+		add chain ip kube-proxy service-LAUZTJTB-ns4/svc4/tcp/p80
+		add rule ip kube-proxy service-LAUZTJTB-ns4/svc4/tcp/p80 ip daddr 172.30.0.44 tcp dport 80 ip saddr != 10.0.0.0/8 jump mark-for-masquerade
+		add rule ip kube-proxy service-LAUZTJTB-ns4/svc4/tcp/p80 numgen random mod 1 vmap { 0 : goto endpoint-WAHRBT2B-ns4/svc4/tcp/p80__10.0.4.1/80 }
+		add chain ip kube-proxy endpoint-WAHRBT2B-ns4/svc4/tcp/p80__10.0.4.1/80
+		add rule ip kube-proxy endpoint-WAHRBT2B-ns4/svc4/tcp/p80__10.0.4.1/80 ip saddr 10.0.4.1 jump mark-for-masquerade
+		add rule ip kube-proxy endpoint-WAHRBT2B-ns4/svc4/tcp/p80__10.0.4.1/80 meta l4proto tcp dnat to 10.0.4.1:80
+		`)
+	assertNFTablesTransactionEqual(t, getLine(), expected, nft.Dump())
+	if len(fp.staleChains) != 0 {
+		t.Errorf("unexpected stale chains: %v", fp.staleChains)
+	}
+
+	// Empty a service's endpoints and restore it after stale chains age.
+	// - its chains will be flushed, but not immediately deleted in the first sync.
+	// - its chains will be deleted first, then recreated in the second sync.
+	fp.OnEndpointSliceUpdate(eps3update2, eps3update3)
+	fp.syncProxyRules()
+	ageStaleChains()
+	fp.OnEndpointSliceUpdate(eps3update3, eps3update2)
+	fp.syncProxyRules()
+	// The second change counteracts the first one, so same expected rules as last time
 	assertNFTablesTransactionEqual(t, getLine(), expected, nft.Dump())
 
 	// Sync with no new changes, so same expected rules as last time
