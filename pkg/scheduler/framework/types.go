@@ -76,14 +76,22 @@ const (
 	Node                  GVK = "Node"
 	PersistentVolume      GVK = "PersistentVolume"
 	PersistentVolumeClaim GVK = "PersistentVolumeClaim"
-	PodSchedulingContext  GVK = "PodSchedulingContext"
-	ResourceClaim         GVK = "ResourceClaim"
-	ResourceClass         GVK = "ResourceClass"
-	StorageClass          GVK = "storage.k8s.io/StorageClass"
 	CSINode               GVK = "storage.k8s.io/CSINode"
 	CSIDriver             GVK = "storage.k8s.io/CSIDriver"
 	CSIStorageCapacity    GVK = "storage.k8s.io/CSIStorageCapacity"
-	WildCard              GVK = "*"
+	StorageClass          GVK = "storage.k8s.io/StorageClass"
+	PodSchedulingContext  GVK = "PodSchedulingContext"
+	ResourceClaim         GVK = "ResourceClaim"
+	ResourceClass         GVK = "ResourceClass"
+
+	// WildCard is a special GVK to match all resources.
+	// e.g., If you register `{Resource: "*", ActionType: All}` in EventsToRegister,
+	// all coming clusterEvents will be admitted. Be careful to register it, it will
+	// increase the computing pressure in requeueing unless you really need it.
+	//
+	// Meanwhile, if the coming clusterEvent is a wildcard one, all pods
+	// will be moved from unschedulablePod pool to activeQ/backoffQ forcibly.
+	WildCard GVK = "*"
 )
 
 type ClusterEventWithHint struct {
@@ -144,17 +152,30 @@ func (ce ClusterEvent) IsWildCard() bool {
 	return ce.Resource == WildCard && ce.ActionType == All
 }
 
+// Match returns true if ClusterEvent is matched with the coming event.
+// If the ce.Resource is "*", there's no requirement for the coming event' Resource.
+// Contrarily, if the coming event's Resource is "*", the ce.Resource should only be "*".
+//
+// Note: we have a special case here when the coming event is a wildcard event,
+// it will force all Pods to move to activeQ/backoffQ,
+// but we take it as an unmatched event unless the ce is also a wildcard one.
+func (ce ClusterEvent) Match(event ClusterEvent) bool {
+	return ce.IsWildCard() || (ce.Resource == WildCard || ce.Resource == event.Resource) && ce.ActionType&event.ActionType != 0
+}
+
 func UnrollWildCardResource() []ClusterEventWithHint {
 	return []ClusterEventWithHint{
 		{Event: ClusterEvent{Resource: Pod, ActionType: All}},
 		{Event: ClusterEvent{Resource: Node, ActionType: All}},
+		{Event: ClusterEvent{Resource: PersistentVolume, ActionType: All}},
+		{Event: ClusterEvent{Resource: PersistentVolumeClaim, ActionType: All}},
 		{Event: ClusterEvent{Resource: CSINode, ActionType: All}},
 		{Event: ClusterEvent{Resource: CSIDriver, ActionType: All}},
 		{Event: ClusterEvent{Resource: CSIStorageCapacity, ActionType: All}},
-		{Event: ClusterEvent{Resource: PersistentVolume, ActionType: All}},
-		{Event: ClusterEvent{Resource: PersistentVolumeClaim, ActionType: All}},
 		{Event: ClusterEvent{Resource: StorageClass, ActionType: All}},
 		{Event: ClusterEvent{Resource: PodSchedulingContext, ActionType: All}},
+		{Event: ClusterEvent{Resource: ResourceClaim, ActionType: All}},
+		{Event: ClusterEvent{Resource: ResourceClass, ActionType: All}},
 	}
 }
 

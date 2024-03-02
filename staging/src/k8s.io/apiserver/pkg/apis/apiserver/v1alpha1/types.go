@@ -176,6 +176,14 @@ type AuthenticationConfiguration struct {
 	// authenticators is neither defined nor stable across releases.  Since
 	// each JWT authenticator must have a unique issuer URL, at most one
 	// JWT authenticator will attempt to cryptographically validate the token.
+	//
+	// The minimum valid JWT payload must contain the following claims:
+	// {
+	//		"iss": "https://issuer.example.com",
+	//		"aud": ["audience"],
+	//		"exp": 1234567890,
+	//		"<username claim>": "username"
+	// }
 	JWT []JWTAuthenticator `json:"jwt"`
 }
 
@@ -225,7 +233,31 @@ type Issuer struct {
 	// Required to be non-empty.
 	// +required
 	Audiences []string `json:"audiences"`
+
+	// audienceMatchPolicy defines how the "audiences" field is used to match the "aud" claim in the presented JWT.
+	// Allowed values are:
+	// 1. "MatchAny" when multiple audiences are specified and
+	// 2. empty (or unset) or "MatchAny" when a single audience is specified.
+	//
+	// - MatchAny: the "aud" claim in the presented JWT must match at least one of the entries in the "audiences" field.
+	// For example, if "audiences" is ["foo", "bar"], the "aud" claim in the presented JWT must contain either "foo" or "bar" (and may contain both).
+	//
+	// - "": The match policy can be empty (or unset) when a single audience is specified in the "audiences" field. The "aud" claim in the presented JWT must contain the single audience (and may contain others).
+	//
+	// For more nuanced audience validation, use claimValidationRules.
+	//   example: claimValidationRule[].expression: 'sets.equivalent(claims.aud, ["bar", "foo", "baz"])' to require an exact match.
+	// +optional
+	AudienceMatchPolicy AudienceMatchPolicyType `json:"audienceMatchPolicy,omitempty"`
 }
+
+// AudienceMatchPolicyType is a set of valid values for issuer.audienceMatchPolicy
+type AudienceMatchPolicyType string
+
+// Valid types for AudienceMatchPolicyType
+const (
+	// MatchAny means the "aud" claim in the presented JWT must match at least one of the entries in the "audiences" field.
+	AudienceMatchPolicyMatchAny AudienceMatchPolicyType = "MatchAny"
+)
 
 // ClaimValidationRule provides the configuration for a single claim validation rule.
 type ClaimValidationRule struct {

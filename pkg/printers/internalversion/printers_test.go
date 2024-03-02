@@ -1506,7 +1506,7 @@ func TestPrintPod(t *testing.T) {
 			[]metav1.TableRow{{Cells: []interface{}{"test14", "2/2", "Running", "9 (5d ago)", "<unknown>"}}},
 		},
 		{
-			// Test PodScheduled condition with reason WaitingForGates
+			// Test PodScheduled condition with reason SchedulingGated
 			api.Pod{
 				ObjectMeta: metav1.ObjectMeta{Name: "test15"},
 				Spec:       api.PodSpec{Containers: make([]api.Container, 2)},
@@ -3121,7 +3121,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "<unknown>/100m", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: <unknown>/100m", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// resource source type, targetVal
 		{
@@ -3164,7 +3164,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "50m/100m", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: 50m/100m", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// resource source type, targetUtil (no current)
 		{
@@ -3196,7 +3196,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "<unknown>/80%", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: <unknown>/80%", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// resource source type, targetUtil
 		{
@@ -3240,7 +3240,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "50%/80%", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: 50%/80%", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// container resource source type, targetVal (no current)
 		{
@@ -3273,7 +3273,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "<unknown>/100m", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: <unknown>/100m", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// container resource source type, targetVal
 		{
@@ -3317,7 +3317,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "50m/100m", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: 50m/100m", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// container resource source type, targetUtil (no current)
 		{
@@ -3350,7 +3350,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "<unknown>/80%", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: <unknown>/80%", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// container resource source type, targetUtil
 		{
@@ -3395,7 +3395,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "50%/80%", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: 50%/80%", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// multiple specs
 		{
@@ -3474,7 +3474,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "50m/100m, 50%/80% + 1 more...", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "50m/100m, cpu: 50%/80% + 1 more...", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 	}
 
@@ -6572,7 +6572,7 @@ func TestPrintIPAddressList(t *testing.T) {
 			{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "192.168.2.2",
-					CreationTimestamp: metav1.Time{Time: time.Now().AddDate(-10, 0, 0)},
+					CreationTimestamp: metav1.Time{},
 				},
 				Spec: networking.IPAddressSpec{
 					ParentRef: &networking.ParentReference{
@@ -6585,7 +6585,7 @@ func TestPrintIPAddressList(t *testing.T) {
 			}, {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "2001:db8::2",
-					CreationTimestamp: metav1.Time{Time: time.Now().AddDate(-5, 0, 0)},
+					CreationTimestamp: metav1.Time{},
 				},
 				Spec: networking.IPAddressSpec{
 					ParentRef: &networking.ParentReference{
@@ -6600,8 +6600,8 @@ func TestPrintIPAddressList(t *testing.T) {
 	}
 	// Columns: Name, ParentRef, Age
 	expected := []metav1.TableRow{
-		{Cells: []interface{}{"192.168.2.2", "myresource.mygroup/mynamespace/myname", "10y"}},
-		{Cells: []interface{}{"2001:db8::2", "myresource2.mygroup2/mynamespace2/myname2", "5y1d"}},
+		{Cells: []interface{}{"192.168.2.2", "myresource.mygroup/mynamespace/myname", "<unknown>"}},
+		{Cells: []interface{}{"2001:db8::2", "myresource2.mygroup2/mynamespace2/myname2", "<unknown>"}},
 	}
 
 	rows, err := printIPAddressList(&ipList, printers.GenerateOptions{})

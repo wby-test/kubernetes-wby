@@ -17,7 +17,6 @@ limitations under the License.
 package util
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"strconv"
@@ -30,11 +29,10 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/tools/events"
 	utilsysctl "k8s.io/component-helpers/node/util/sysctl"
+	"k8s.io/klog/v2"
 	helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"k8s.io/kubernetes/pkg/features"
 	netutils "k8s.io/utils/net"
-
-	"k8s.io/klog/v2"
 )
 
 const (
@@ -85,11 +83,6 @@ func IsLoopBack(ip string) bool {
 		return netIP.IsLoopback()
 	}
 	return false
-}
-
-// Resolver is an interface for net.Resolver
-type Resolver interface {
-	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
 }
 
 // GetLocalAddrs returns a list of all network addresses on the local system

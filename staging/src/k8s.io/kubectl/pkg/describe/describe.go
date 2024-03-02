@@ -829,7 +829,7 @@ func describePod(pod *corev1.Pod, events *corev1.EventList) (string, error) {
 				w.Write(LEVEL_0, "LocalhostProfile:\t%s\n", *pod.Spec.SecurityContext.SeccompProfile.LocalhostProfile)
 			}
 		}
-		// remove when .IP field is depreciated
+		// remove when .IP field is deprecated
 		w.Write(LEVEL_0, "IP:\t%s\n", pod.Status.PodIP)
 		describePodIPs(pod, w, "")
 		if controlledBy := printController(pod); len(controlledBy) > 0 {
@@ -2215,6 +2215,8 @@ func DescribePodTemplate(template *corev1.PodTemplateSpec, w PrefixWriter) {
 	if len(template.Spec.PriorityClassName) > 0 {
 		w.Write(LEVEL_1, "Priority Class Name:\t%s\n", template.Spec.PriorityClassName)
 	}
+	printLabelsMultiline(w, "  Node-Selectors", template.Spec.NodeSelector)
+	printPodTolerationsMultiline(w, "  Tolerations", template.Spec.Tolerations)
 }
 
 // ReplicaSetDescriber generates information about a ReplicaSet and the pods it has created.
@@ -2323,6 +2325,15 @@ func describeJob(job *batchv1.Job, events *corev1.EventList) (string, error) {
 		}
 		if job.Spec.CompletionMode != nil {
 			w.Write(LEVEL_0, "Completion Mode:\t%s\n", *job.Spec.CompletionMode)
+		}
+		if job.Spec.Suspend != nil {
+			w.Write(LEVEL_0, "Suspend:\t%v\n", *job.Spec.Suspend)
+		}
+		if job.Spec.BackoffLimit != nil {
+			w.Write(LEVEL_0, "Backoff Limit:\t%v\n", *job.Spec.BackoffLimit)
+		}
+		if job.Spec.TTLSecondsAfterFinished != nil {
+			w.Write(LEVEL_0, "TTL Seconds After Finished:\t%v\n", *job.Spec.TTLSecondsAfterFinished)
 		}
 		if job.Status.StartTime != nil {
 			w.Write(LEVEL_0, "Start Time:\t%s\n", job.Status.StartTime.Time.Format(time.RFC1123Z))
@@ -3734,7 +3745,7 @@ func describeNode(node *corev1.Node, nodeNonTerminatedPodsList *corev1.PodList, 
 		w.Write(LEVEL_0, "  Kubelet Version:\t%s\n", node.Status.NodeInfo.KubeletVersion)
 		w.Write(LEVEL_0, "  Kube-Proxy Version:\t%s\n", node.Status.NodeInfo.KubeProxyVersion)
 
-		// remove when .PodCIDR is depreciated
+		// remove when .PodCIDR is deprecated
 		if len(node.Spec.PodCIDR) > 0 {
 			w.Write(LEVEL_0, "PodCIDR:\t%s\n", node.Spec.PodCIDR)
 		}

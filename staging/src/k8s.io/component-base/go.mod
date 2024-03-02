@@ -2,7 +2,7 @@
 
 module k8s.io/component-base
 
-go 1.21
+go 1.22.0
 
 require (
 	github.com/blang/semver/v4 v4.0.0
@@ -23,7 +23,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.19.0
 	go.opentelemetry.io/otel/trace v1.19.0
 	go.uber.org/zap v1.26.0
-	golang.org/x/sys v0.15.0
+	golang.org/x/sys v0.17.0
 	gopkg.in/yaml.v2 v2.4.0
 	k8s.io/apimachinery v0.0.0
 	k8s.io/client-go v0.0.0
@@ -64,9 +64,9 @@ require (
 	go.opentelemetry.io/proto/otlp v1.0.0 // indirect
 	go.uber.org/goleak v1.3.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/net v0.19.0 // indirect
+	golang.org/x/net v0.21.0 // indirect
 	golang.org/x/oauth2 v0.10.0 // indirect
-	golang.org/x/term v0.15.0 // indirect
+	golang.org/x/term v0.17.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
@@ -77,7 +77,7 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/api v0.0.0 // indirect
-	k8s.io/kube-openapi v0.0.0-20231113174909-778a5567bc1e // indirect
+	k8s.io/kube-openapi v0.0.0-20240228011516-70dd3763d340 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
 	sigs.k8s.io/yaml v1.3.0 // indirect
 )

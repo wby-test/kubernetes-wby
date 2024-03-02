@@ -22,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 
 	bootstraptokenv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/bootstraptoken/v1"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
@@ -59,7 +60,7 @@ const (
 	DefaultImagePullPolicy = corev1.PullIfNotPresent
 
 	// DefaultEncryptionAlgorithm is the default encryption algorithm.
-	DefaultEncryptionAlgorithm = EncryptionAlgorithmRSA
+	DefaultEncryptionAlgorithm = EncryptionAlgorithmRSA2048
 )
 
 func addDefaultingFuncs(scheme *runtime.Scheme) error {
@@ -194,6 +195,9 @@ func SetDefaults_NodeRegistration(obj *NodeRegistrationOptions) {
 	if len(obj.ImagePullPolicy) == 0 {
 		obj.ImagePullPolicy = DefaultImagePullPolicy
 	}
+	if obj.ImagePullSerial == nil {
+		obj.ImagePullSerial = ptr.To(true)
+	}
 }
 
 // SetDefaults_ResetConfiguration assigns default values for the ResetConfiguration object
@@ -250,5 +254,24 @@ func SetDefaults_Timeouts(obj *Timeouts) {
 		obj.Discovery = &metav1.Duration{
 			Duration: constants.DiscoveryTimeout,
 		}
+	}
+}
+
+// SetDefaults_UpgradeConfiguration assigns default values for the UpgradeConfiguration
+func SetDefaults_UpgradeConfiguration(obj *UpgradeConfiguration) {
+	if obj.Node.EtcdUpgrade == nil {
+		obj.Node.EtcdUpgrade = ptr.To(true)
+	}
+
+	if obj.Node.CertificateRenewal == nil {
+		obj.Node.CertificateRenewal = ptr.To(true)
+	}
+
+	if obj.Apply.EtcdUpgrade == nil {
+		obj.Apply.EtcdUpgrade = ptr.To(true)
+	}
+
+	if obj.Apply.CertificateRenewal == nil {
+		obj.Apply.CertificateRenewal = ptr.To(true)
 	}
 }

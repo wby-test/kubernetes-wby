@@ -130,6 +130,7 @@ type syncJobCtx struct {
 	finishedCondition               *batch.JobCondition
 	activePods                      []*v1.Pod
 	succeeded                       int32
+	failed                          int32
 	prevSucceededIndexes            orderedIntervals
 	succeededIndexes                orderedIntervals
 	failedIndexes                   *orderedIntervals
@@ -147,7 +148,7 @@ func NewController(ctx context.Context, podInformer coreinformers.PodInformer, j
 }
 
 func newControllerWithClock(ctx context.Context, podInformer coreinformers.PodInformer, jobInformer batchinformers.JobInformer, kubeClient clientset.Interface, clock clock.WithTicker) (*Controller, error) {
-	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster := record.NewBroadcaster(record.WithContext(ctx))
 	logger := klog.FromContext(ctx)
 
 	jm := &Controller{
@@ -213,7 +214,7 @@ func (jm *Controller) Run(ctx context.Context, workers int) {
 	logger := klog.FromContext(ctx)
 
 	// Start events processing pipeline.
-	jm.broadcaster.StartStructuredLogging(0)
+	jm.broadcaster.StartStructuredLogging(3)
 	jm.broadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: jm.kubeClient.CoreV1().Events("")})
 	defer jm.broadcaster.Shutdown()
 
@@ -790,7 +791,7 @@ func (jm *Controller) syncJob(ctx context.Context, key string) (rErr error) {
 	active := int32(len(jobCtx.activePods))
 	newSucceededPods, newFailedPods := getNewFinishedPods(jobCtx)
 	jobCtx.succeeded = job.Status.Succeeded + int32(len(newSucceededPods)) + int32(len(jobCtx.uncounted.succeeded))
-	failed := job.Status.Failed + int32(nonIgnoredFailedPodsCount(jobCtx, newFailedPods)) + int32(len(jobCtx.uncounted.failed))
+	jobCtx.failed = job.Status.Failed + int32(nonIgnoredFailedPodsCount(jobCtx, newFailedPods)) + int32(len(jobCtx.uncounted.failed))
 	var ready *int32
 	if feature.DefaultFeatureGate.Enabled(features.JobReadyPods) {
 		ready = ptr.To(countReadyPods(jobCtx.activePods))
@@ -806,7 +807,7 @@ func (jm *Controller) syncJob(ctx context.Context, key string) (rErr error) {
 
 	var manageJobErr error
 
-	exceedsBackoffLimit := failed > *job.Spec.BackoffLimit
+	exceedsBackoffLimit := jobCtx.failed > *job.Spec.BackoffLimit
 
 	if feature.DefaultFeatureGate.Enabled(features.JobPodFailurePolicy) {
 		if failureTargetCondition := findConditionByType(job.Status.Conditions, batch.JobFailureTarget); failureTargetCondition != nil {
@@ -1618,7 +1619,7 @@ func (jm *Controller) manageJob(ctx context.Context, job *batch.Job, jobCtx *syn
 			}
 			diff -= batchSize
 		}
-		recordJobPodsCreationTotal(job, creationsSucceeded, creationsFailed)
+		recordJobPodsCreationTotal(job, jobCtx, creationsSucceeded, creationsFailed)
 		return active, metrics.JobSyncActionPodsCreated, errorFromChannel(errCh)
 	}
 
@@ -1917,16 +1918,13 @@ func (jm *Controller) cleanupPodFinalizers(job *batch.Job) {
 	}
 }
 
-func recordJobPodsCreationTotal(job *batch.Job, succeeded, failed int32) {
+func recordJobPodsCreationTotal(job *batch.Job, jobCtx *syncJobCtx, succeeded, failed int32) {
 	reason := metrics.PodCreateNew
 	if feature.DefaultFeatureGate.Enabled(features.JobPodReplacementPolicy) {
-		podsTerminating := job.Status.Terminating != nil && *job.Status.Terminating > 0
-		isRecreateAction := podsTerminating || job.Status.Failed > 0
-		if isRecreateAction {
+		if ptr.Deref(job.Spec.PodReplacementPolicy, batch.TerminatingOrFailed) == batch.Failed && jobCtx.failed > 0 {
+			reason = metrics.PodRecreateFailed
+		} else if jobCtx.failed > 0 || ptr.Deref(jobCtx.terminating, 0) > 0 {
 			reason = metrics.PodRecreateTerminatingOrFailed
-			if *job.Spec.PodReplacementPolicy == batch.Failed {
-				reason = metrics.PodRecreateFailed
-			}
 		}
 	}
 	if succeeded > 0 {

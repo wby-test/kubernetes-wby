@@ -425,7 +425,7 @@ type PersistentVolumeStatus struct {
 	Reason string `json:"reason,omitempty" protobuf:"bytes,3,opt,name=reason"`
 	// lastPhaseTransitionTime is the time the phase transitioned from one to another
 	// and automatically resets to current time everytime a volume phase transitions.
-	// This is an alpha field and requires enabling PersistentVolumeLastPhaseTransitionTime feature.
+	// This is a beta field and requires the PersistentVolumeLastPhaseTransitionTime feature to be enabled (enabled by default).
 	// +featureGate=PersistentVolumeLastPhaseTransitionTime
 	// +optional
 	LastPhaseTransitionTime *metav1.Time `json:"lastPhaseTransitionTime,omitempty" protobuf:"bytes,4,opt,name=lastPhaseTransitionTime"`
@@ -556,7 +556,7 @@ type PersistentVolumeClaimSpec struct {
 	// If the resource referred to by volumeAttributesClass does not exist, this PersistentVolumeClaim will be
 	// set to a Pending state, as reflected by the modifyVolumeStatus field, until such as a resource
 	// exists.
-	// More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#volumeattributesclass
+	// More info: https://kubernetes.io/docs/concepts/storage/volume-attributes-classes/
 	// (Alpha) Using this field requires the VolumeAttributesClass feature gate to be enabled.
 	// +featureGate=VolumeAttributesClass
 	// +optional
@@ -3599,7 +3599,7 @@ type PodSpec struct {
 	// More info: https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty" protobuf:"bytes,8,opt,name=serviceAccountName"`
-	// DeprecatedServiceAccount is a depreciated alias for ServiceAccountName.
+	// DeprecatedServiceAccount is a deprecated alias for ServiceAccountName.
 	// Deprecated: Use serviceAccountName instead.
 	// +k8s:conversion-gen=false
 	// +optional
@@ -5867,8 +5867,7 @@ const (
 type NodeConditionType string
 
 // These are valid but not exhaustive conditions of node. A cloud provider may set a condition not listed here.
-// The built-in set of conditions are:
-// NodeReachable, NodeLive, NodeReady, NodeSchedulable, NodeRunnable.
+// Relevant events contain "NodeReady", "NodeNotReady", "NodeSchedulable", and "NodeNotSchedulable".
 const (
 	// NodeReady means kubelet is healthy and ready to accept pods.
 	NodeReady NodeConditionType = "Ready"
@@ -7094,7 +7093,7 @@ const (
 type DownwardAPIVolumeFile struct {
 	// Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the '..' path. Must be utf-8 encoded. The first item of the relative path must not start with '..'
 	Path string `json:"path" protobuf:"bytes,1,opt,name=path"`
-	// Required: Selects a field of the pod: only annotations, labels, name and namespace are supported.
+	// Required: Selects a field of the pod: only annotations, labels, name, namespace and uid are supported.
 	// +optional
 	FieldRef *ObjectFieldSelector `json:"fieldRef,omitempty" protobuf:"bytes,2,opt,name=fieldRef"`
 	// Selects a resource of the container: only resources limits and requests

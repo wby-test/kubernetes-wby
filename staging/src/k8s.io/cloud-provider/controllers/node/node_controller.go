@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -29,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -44,7 +44,6 @@ import (
 	cloudnodeutil "k8s.io/cloud-provider/node/helpers"
 	controllersmetrics "k8s.io/component-base/metrics/prometheus/controllers"
 	nodeutil "k8s.io/component-helpers/node/util"
-	"k8s.io/controller-manager/pkg/features"
 	"k8s.io/klog/v2"
 )
 
@@ -283,11 +282,6 @@ func (cnc *CloudNodeController) UpdateNodeStatus(ctx context.Context) error {
 		}
 
 		cnc.updateNodeAddress(ctx, node, instanceMetadata)
-
-		err = cnc.reconcileNodeLabels(node.Name)
-		if err != nil {
-			klog.Errorf("Error reconciling node labels for node %q, err: %v", node.Name, err)
-		}
 	}
 
 	workqueue.ParallelizeUntil(ctx, int(cnc.workerCount), len(nodes), updateNodeFunc)
@@ -423,9 +417,8 @@ func (cnc *CloudNodeController) syncNode(ctx context.Context, nodeName string) e
 
 	cloudTaint := getCloudTaint(curNode.Spec.Taints)
 	if cloudTaint == nil {
-		// Node object received from event had the cloud taint but was outdated,
-		// the node has actually already been initialized, so this sync event can be ignored.
-		return nil
+		// Node object was already initialized, only need to reconcile the labels
+		return cnc.reconcileNodeLabels(nodeName)
 	}
 
 	klog.Infof("Initializing node %s with cloud provider", nodeName)
@@ -574,6 +567,30 @@ func (cnc *CloudNodeController) getNodeModifiersFromCloudProvider(
 		})
 	}
 
+	if len(instanceMeta.AdditionalLabels) > 0 {
+		klog.V(2).Infof("Adding additional node label(s) from cloud provider: %v", instanceMeta.AdditionalLabels)
+		nodeModifiers = append(nodeModifiers, func(n *v1.Node) {
+			if n.Labels == nil {
+				n.Labels = map[string]string{}
+			}
+
+			k8sNamespaceRegex := regexp.MustCompile("(kubernetes|k8s).io/")
+			for k, v := range instanceMeta.AdditionalLabels {
+				// Cloud provider should not be using kubernetes namespaces in labels
+				if isK8sNamespace := k8sNamespaceRegex.MatchString(k); isK8sNamespace {
+					klog.Warningf("Discarding node label %s with kubernetes namespace", k)
+					continue
+				} else if originalVal, ok := n.Labels[k]; ok {
+					if originalVal != v {
+						klog.Warningf("Discarding node label %s that is already present", k)
+					}
+					continue
+				}
+				n.Labels[k] = v
+			}
+		})
+	}
+
 	return nodeModifiers, nil
 }
 
@@ -690,29 +707,6 @@ func excludeCloudTaint(taints []v1.Taint) []v1.Taint {
 	return newTaints
 }
 
-// ensureNodeExistsByProviderID checks if the instance exists by the provider id,
-// If provider id in spec is empty it calls instanceId with node name to get provider id
-func ensureNodeExistsByProviderID(ctx context.Context, instances cloudprovider.Instances, node *v1.Node) (bool, error) {
-	providerID := node.Spec.ProviderID
-	if providerID == "" {
-		var err error
-		providerID, err = instances.InstanceID(ctx, types.NodeName(node.Name))
-		if err != nil {
-			if err == cloudprovider.InstanceNotFound {
-				return false, nil
-			}
-			return false, err
-		}
-
-		if providerID == "" {
-			klog.Warningf("Cannot find valid providerID for node name %q, assuming non existence", node.Name)
-			return false, nil
-		}
-	}
-
-	return instances.InstanceExistsByProviderID(ctx, providerID)
-}
-
 func getNodeAddressesByProviderIDOrName(ctx context.Context, instances cloudprovider.Instances, providerID, nodeName string) ([]v1.NodeAddress, error) {
 	nodeAddresses, err := instances.NodeAddressesByProviderID(ctx, providerID)
 	if err != nil {
@@ -748,7 +742,7 @@ func updateNodeAddressesFromNodeIP(node *v1.Node, nodeAddresses []v1.NodeAddress
 
 	providedNodeIP, exists := node.ObjectMeta.Annotations[cloudproviderapi.AnnotationAlphaProvidedIPAddr]
 	if exists {
-		nodeAddresses, err = cloudnodeutil.GetNodeAddressesFromNodeIP(providedNodeIP, nodeAddresses, utilfeature.DefaultFeatureGate.Enabled(features.CloudDualStackNodeIPs))
+		nodeAddresses, err = cloudnodeutil.GetNodeAddressesFromNodeIP(providedNodeIP, nodeAddresses)
 	}
 
 	return nodeAddresses, err
