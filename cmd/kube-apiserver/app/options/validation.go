@@ -153,6 +153,7 @@ func validateAPIServerIdentity(options *ServerRunOptions) []error {
 }
 
 // Validate checks ServerRunOptions and return a slice of found errs.
+// 可以一次性校验完所有的命令行参数是否设置正确
 func (s *ServerRunOptions) Validate() []error {
 	var errs []error
 	if s.MasterCount <= 0 {

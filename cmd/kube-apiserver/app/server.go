@@ -114,7 +114,7 @@ cluster's shared state through which all other components interact.`,
 			}
 			cliflag.PrintFlags(fs)
 
-			// set default options
+			// set default options 安全认证初始化(需要处理的一些命令行参数)
 			completedOptions, err := Complete(s)
 			if err != nil {
 				return err
@@ -242,6 +242,7 @@ func CreateKubeAPIServerConfig(s completedServerRunOptions) (
 ) {
 	proxyTransport := CreateProxyTransport()
 
+	// 初始化配置informer hook 存储
 	genericConfig, versionedInformers, serviceResolver, pluginInitializers, admissionPostStartHook, storageFactory, err := buildGenericConfig(s.ServerRunOptions, proxyTransport)
 	if err != nil {
 		return nil, nil, nil, err
