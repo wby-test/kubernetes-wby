@@ -294,6 +294,7 @@ spec:
     resources:
       claims:
       - name: nameValue
+        request: requestValue
       limits:
         limitsKey: "0"
       requests:
@@ -301,6 +302,9 @@ spec:
     restartPolicy: restartPolicyValue
     securityContext:
       allowPrivilegeEscalation: true
+      appArmorProfile:
+        localhostProfile: localhostProfileValue
+        type: typeValue
       capabilities:
         add:
         - addValue
@@ -362,6 +366,7 @@ spec:
       mountPropagation: mountPropagationValue
       name: nameValue
       readOnly: true
+      recursiveReadOnly: recursiveReadOnlyValue
       subPath: subPathValue
       subPathExpr: subPathExprValue
     workingDir: workingDirValue
@@ -505,6 +510,7 @@ spec:
     resources:
       claims:
       - name: nameValue
+        request: requestValue
       limits:
         limitsKey: "0"
       requests:
@@ -512,6 +518,9 @@ spec:
     restartPolicy: restartPolicyValue
     securityContext:
       allowPrivilegeEscalation: true
+      appArmorProfile:
+        localhostProfile: localhostProfileValue
+        type: typeValue
       capabilities:
         add:
         - addValue
@@ -574,6 +583,7 @@ spec:
       mountPropagation: mountPropagationValue
       name: nameValue
       readOnly: true
+      recursiveReadOnly: recursiveReadOnlyValue
       subPath: subPathValue
       subPathExpr: subPathExprValue
     workingDir: workingDirValue
@@ -718,6 +728,7 @@ spec:
     resources:
       claims:
       - name: nameValue
+        request: requestValue
       limits:
         limitsKey: "0"
       requests:
@@ -725,6 +736,9 @@ spec:
     restartPolicy: restartPolicyValue
     securityContext:
       allowPrivilegeEscalation: true
+      appArmorProfile:
+        localhostProfile: localhostProfileValue
+        type: typeValue
       capabilities:
         add:
         - addValue
@@ -786,6 +800,7 @@ spec:
       mountPropagation: mountPropagationValue
       name: nameValue
       readOnly: true
+      recursiveReadOnly: recursiveReadOnlyValue
       subPath: subPathValue
       subPathExpr: subPathExprValue
     workingDir: workingDirValue
@@ -803,15 +818,17 @@ spec:
   - conditionType: conditionTypeValue
   resourceClaims:
   - name: nameValue
-    source:
-      resourceClaimName: resourceClaimNameValue
-      resourceClaimTemplateName: resourceClaimTemplateNameValue
+    resourceClaimName: resourceClaimNameValue
+    resourceClaimTemplateName: resourceClaimTemplateNameValue
   restartPolicy: restartPolicyValue
   runtimeClassName: runtimeClassNameValue
   schedulerName: schedulerNameValue
   schedulingGates:
   - name: nameValue
   securityContext:
+    appArmorProfile:
+      localhostProfile: localhostProfileValue
+      type: typeValue
     fsGroup: 5
     fsGroupChangePolicy: fsGroupChangePolicyValue
     runAsGroup: 6
@@ -827,6 +844,7 @@ spec:
       type: typeValue
     supplementalGroups:
     - 4
+    supplementalGroupsPolicy: supplementalGroupsPolicyValue
     sysctls:
     - name: nameValue
       value: valueValue
@@ -1025,6 +1043,9 @@ spec:
     hostPath:
       path: pathValue
       type: typeValue
+    image:
+      pullPolicy: pullPolicyValue
+      reference: referenceValue
     iscsi:
       chapAuthDiscovery: true
       chapAuthSession: true
@@ -1160,6 +1181,11 @@ status:
   containerStatuses:
   - allocatedResources:
       allocatedResourcesKey: "0"
+    allocatedResourcesStatus:
+    - name: nameValue
+      resources:
+      - health: healthValue
+        resourceID: resourceIDValue
     containerID: containerIDValue
     image: imageValue
     imageID: imageIDValue
@@ -1182,6 +1208,7 @@ status:
     resources:
       claims:
       - name: nameValue
+        request: requestValue
       limits:
         limitsKey: "0"
       requests:
@@ -1202,9 +1229,25 @@ status:
       waiting:
         message: messageValue
         reason: reasonValue
+    user:
+      linux:
+        gid: 2
+        supplementalGroups:
+        - 3
+        uid: 1
+    volumeMounts:
+    - mountPath: mountPathValue
+      name: nameValue
+      readOnly: true
+      recursiveReadOnly: recursiveReadOnlyValue
   ephemeralContainerStatuses:
   - allocatedResources:
       allocatedResourcesKey: "0"
+    allocatedResourcesStatus:
+    - name: nameValue
+      resources:
+      - health: healthValue
+        resourceID: resourceIDValue
     containerID: containerIDValue
     image: imageValue
     imageID: imageIDValue
@@ -1227,6 +1270,7 @@ status:
     resources:
       claims:
       - name: nameValue
+        request: requestValue
       limits:
         limitsKey: "0"
       requests:
@@ -1247,12 +1291,28 @@ status:
       waiting:
         message: messageValue
         reason: reasonValue
+    user:
+      linux:
+        gid: 2
+        supplementalGroups:
+        - 3
+        uid: 1
+    volumeMounts:
+    - mountPath: mountPathValue
+      name: nameValue
+      readOnly: true
+      recursiveReadOnly: recursiveReadOnlyValue
   hostIP: hostIPValue
   hostIPs:
   - ip: ipValue
   initContainerStatuses:
   - allocatedResources:
       allocatedResourcesKey: "0"
+    allocatedResourcesStatus:
+    - name: nameValue
+      resources:
+      - health: healthValue
+        resourceID: resourceIDValue
     containerID: containerIDValue
     image: imageValue
     imageID: imageIDValue
@@ -1275,6 +1335,7 @@ status:
     resources:
       claims:
       - name: nameValue
+        request: requestValue
       limits:
         limitsKey: "0"
       requests:
@@ -1295,6 +1356,17 @@ status:
       waiting:
         message: messageValue
         reason: reasonValue
+    user:
+      linux:
+        gid: 2
+        supplementalGroups:
+        - 3
+        uid: 1
+    volumeMounts:
+    - mountPath: mountPathValue
+      name: nameValue
+      readOnly: true
+      recursiveReadOnly: recursiveReadOnlyValue
   message: messageValue
   nominatedNodeName: nominatedNodeNameValue
   phase: phaseValue

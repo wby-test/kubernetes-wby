@@ -346,6 +346,7 @@ spec:
         resources:
           claims:
           - name: nameValue
+            request: requestValue
           limits:
             limitsKey: "0"
           requests:
@@ -353,6 +354,9 @@ spec:
         restartPolicy: restartPolicyValue
         securityContext:
           allowPrivilegeEscalation: true
+          appArmorProfile:
+            localhostProfile: localhostProfileValue
+            type: typeValue
           capabilities:
             add:
             - addValue
@@ -414,6 +418,7 @@ spec:
           mountPropagation: mountPropagationValue
           name: nameValue
           readOnly: true
+          recursiveReadOnly: recursiveReadOnlyValue
           subPath: subPathValue
           subPathExpr: subPathExprValue
         workingDir: workingDirValue
@@ -557,6 +562,7 @@ spec:
         resources:
           claims:
           - name: nameValue
+            request: requestValue
           limits:
             limitsKey: "0"
           requests:
@@ -564,6 +570,9 @@ spec:
         restartPolicy: restartPolicyValue
         securityContext:
           allowPrivilegeEscalation: true
+          appArmorProfile:
+            localhostProfile: localhostProfileValue
+            type: typeValue
           capabilities:
             add:
             - addValue
@@ -626,6 +635,7 @@ spec:
           mountPropagation: mountPropagationValue
           name: nameValue
           readOnly: true
+          recursiveReadOnly: recursiveReadOnlyValue
           subPath: subPathValue
           subPathExpr: subPathExprValue
         workingDir: workingDirValue
@@ -770,6 +780,7 @@ spec:
         resources:
           claims:
           - name: nameValue
+            request: requestValue
           limits:
             limitsKey: "0"
           requests:
@@ -777,6 +788,9 @@ spec:
         restartPolicy: restartPolicyValue
         securityContext:
           allowPrivilegeEscalation: true
+          appArmorProfile:
+            localhostProfile: localhostProfileValue
+            type: typeValue
           capabilities:
             add:
             - addValue
@@ -838,6 +852,7 @@ spec:
           mountPropagation: mountPropagationValue
           name: nameValue
           readOnly: true
+          recursiveReadOnly: recursiveReadOnlyValue
           subPath: subPathValue
           subPathExpr: subPathExprValue
         workingDir: workingDirValue
@@ -855,15 +870,17 @@ spec:
       - conditionType: conditionTypeValue
       resourceClaims:
       - name: nameValue
-        source:
-          resourceClaimName: resourceClaimNameValue
-          resourceClaimTemplateName: resourceClaimTemplateNameValue
+        resourceClaimName: resourceClaimNameValue
+        resourceClaimTemplateName: resourceClaimTemplateNameValue
       restartPolicy: restartPolicyValue
       runtimeClassName: runtimeClassNameValue
       schedulerName: schedulerNameValue
       schedulingGates:
       - name: nameValue
       securityContext:
+        appArmorProfile:
+          localhostProfile: localhostProfileValue
+          type: typeValue
         fsGroup: 5
         fsGroupChangePolicy: fsGroupChangePolicyValue
         runAsGroup: 6
@@ -879,6 +896,7 @@ spec:
           type: typeValue
         supplementalGroups:
         - 4
+        supplementalGroupsPolicy: supplementalGroupsPolicyValue
         sysctls:
         - name: nameValue
           value: valueValue
@@ -1077,6 +1095,9 @@ spec:
         hostPath:
           path: pathValue
           type: typeValue
+        image:
+          pullPolicy: pullPolicyValue
+          reference: referenceValue
         iscsi:
           chapAuthDiscovery: true
           chapAuthSession: true

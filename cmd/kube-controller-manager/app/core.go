@@ -338,8 +338,6 @@ func startPersistentVolumeBinderController(ctx context.Context, controllerContex
 		KubeClient:                controllerContext.ClientBuilder.ClientOrDie("persistent-volume-binder"),
 		SyncPeriod:                controllerContext.ComponentConfig.PersistentVolumeBinderController.PVClaimBinderSyncPeriod.Duration,
 		VolumePlugins:             plugins,
-		Cloud:                     controllerContext.Cloud,
-		ClusterName:               controllerContext.ComponentConfig.KubeCloudShared.ClusterName,
 		VolumeInformer:            controllerContext.InformerFactory.Core().V1().PersistentVolumes(),
 		ClaimInformer:             controllerContext.InformerFactory.Core().V1().PersistentVolumeClaims(),
 		ClassInformer:             controllerContext.InformerFactory.Storage().V1().StorageClasses(),
@@ -385,7 +383,6 @@ func startPersistentVolumeAttachDetachController(ctx context.Context, controller
 			csiNodeInformer,
 			csiDriverInformer,
 			controllerContext.InformerFactory.Storage().V1().VolumeAttachments(),
-			controllerContext.Cloud,
 			plugins,
 			GetDynamicPluginProber(controllerContext.ComponentConfig.PersistentVolumeBinderController.VolumeConfiguration),
 			controllerContext.ComponentConfig.AttachDetachController.DisableAttachDetachReconcilerSync,
@@ -420,7 +417,6 @@ func startPersistentVolumeExpanderController(ctx context.Context, controllerCont
 		ctx,
 		controllerContext.ClientBuilder.ClientOrDie("expand-controller"),
 		controllerContext.InformerFactory.Core().V1().PersistentVolumeClaims(),
-		controllerContext.Cloud,
 		plugins,
 		csiTranslator,
 		csimigration.NewPluginManager(csiTranslator, utilfeature.DefaultFeatureGate),
@@ -472,9 +468,9 @@ func startResourceClaimController(ctx context.Context, controllerContext Control
 		klog.FromContext(ctx),
 		controllerContext.ClientBuilder.ClientOrDie("resource-claim-controller"),
 		controllerContext.InformerFactory.Core().V1().Pods(),
-		controllerContext.InformerFactory.Resource().V1alpha2().PodSchedulingContexts(),
-		controllerContext.InformerFactory.Resource().V1alpha2().ResourceClaims(),
-		controllerContext.InformerFactory.Resource().V1alpha2().ResourceClaimTemplates())
+		controllerContext.InformerFactory.Resource().V1alpha3().PodSchedulingContexts(),
+		controllerContext.InformerFactory.Resource().V1alpha3().ResourceClaims(),
+		controllerContext.InformerFactory.Resource().V1alpha3().ResourceClaimTemplates())
 	if err != nil {
 		return nil, true, fmt.Errorf("failed to start resource claim controller: %v", err)
 	}
@@ -689,17 +685,16 @@ func startGarbageCollectorController(ctx context.Context, controllerContext Cont
 	for _, r := range controllerContext.ComponentConfig.GarbageCollectorController.GCIgnoredResources {
 		ignoredResources[schema.GroupResource{Group: r.Group, Resource: r.Resource}] = struct{}{}
 	}
-	garbageCollector, err := garbagecollector.NewGarbageCollector(
+
+	garbageCollector, err := garbagecollector.NewComposedGarbageCollector(
 		ctx,
 		gcClientset,
 		metadataClient,
 		controllerContext.RESTMapper,
-		ignoredResources,
-		controllerContext.ObjectOrMetadataInformerFactory,
-		controllerContext.InformersStarted,
+		controllerContext.GraphBuilder,
 	)
 	if err != nil {
-		return nil, true, fmt.Errorf("failed to start the generic garbage collector: %v", err)
+		return nil, true, fmt.Errorf("failed to start the generic garbage collector: %w", err)
 	}
 
 	// Start the garbage collector.

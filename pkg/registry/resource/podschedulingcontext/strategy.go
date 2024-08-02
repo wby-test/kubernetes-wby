@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -52,7 +53,7 @@ func (podSchedulingStrategy) NamespaceScoped() bool {
 // status.
 func (podSchedulingStrategy) GetResetFields() map[fieldpath.APIVersion]*fieldpath.Set {
 	fields := map[fieldpath.APIVersion]*fieldpath.Set{
-		"resource.k8s.io/v1alpha2": fieldpath.NewSet(
+		"resource.k8s.io/v1alpha3": fieldpath.NewSet(
 			fieldpath.MakePathOrDie("status"),
 		),
 	}
@@ -113,7 +114,7 @@ var StatusStrategy = podSchedulingStatusStrategy{Strategy}
 // should not be modified by the user. For a status update that is the spec.
 func (podSchedulingStatusStrategy) GetResetFields() map[fieldpath.APIVersion]*fieldpath.Set {
 	fields := map[fieldpath.APIVersion]*fieldpath.Set{
-		"resource.k8s.io/v1alpha2": fieldpath.NewSet(
+		"resource.k8s.io/v1alpha3": fieldpath.NewSet(
 			fieldpath.MakePathOrDie("spec"),
 		),
 	}
@@ -125,6 +126,7 @@ func (podSchedulingStatusStrategy) PrepareForUpdate(ctx context.Context, obj, ol
 	newScheduling := obj.(*resource.PodSchedulingContext)
 	oldScheduling := old.(*resource.PodSchedulingContext)
 	newScheduling.Spec = oldScheduling.Spec
+	metav1.ResetObjectMetaForStatus(&newScheduling.ObjectMeta, &oldScheduling.ObjectMeta)
 }
 
 func (podSchedulingStatusStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {

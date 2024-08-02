@@ -167,22 +167,50 @@ func TestPreconditionalDeleteWithSuggestionPass(t *testing.T) {
 }
 
 func TestList(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ConsistentListFromCache, false)
 	ctx, cacher, server, terminate := testSetupWithEtcdServer(t)
 	t.Cleanup(terminate)
 	storagetesting.RunTestList(ctx, t, cacher, compactStorage(cacher, server.V3Client), true)
 }
 
-func TestListWithListFromCache(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ConsistentListFromCache, true)()
+func TestListWithConsistentListFromCache(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ConsistentListFromCache, true)
 	ctx, cacher, server, terminate := testSetupWithEtcdServer(t)
 	t.Cleanup(terminate)
 	storagetesting.RunTestList(ctx, t, cacher, compactStorage(cacher, server.V3Client), true)
+}
+
+func TestConsistentList(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ConsistentListFromCache, false)
+	ctx, cacher, server, terminate := testSetupWithEtcdServer(t)
+	t.Cleanup(terminate)
+	storagetesting.RunTestConsistentList(ctx, t, cacher, compactStorage(cacher, server.V3Client), true, false)
+}
+
+func TestConsistentListWithConsistentListFromCache(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ConsistentListFromCache, true)
+	ctx, cacher, server, terminate := testSetupWithEtcdServer(t)
+	t.Cleanup(terminate)
+	storagetesting.RunTestConsistentList(ctx, t, cacher, compactStorage(cacher, server.V3Client), true, true)
 }
 
 func TestGetListNonRecursive(t *testing.T) {
-	ctx, cacher, terminate := testSetup(t)
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ConsistentListFromCache, false)
+	ctx, cacher, server, terminate := testSetupWithEtcdServer(t)
 	t.Cleanup(terminate)
-	storagetesting.RunTestGetListNonRecursive(ctx, t, cacher)
+	storagetesting.RunTestGetListNonRecursive(ctx, t, compactStorage(cacher, server.V3Client), cacher)
+}
+
+func TestGetListNonRecursiveWithConsistentListFromCache(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ConsistentListFromCache, true)
+	ctx, cacher, server, terminate := testSetupWithEtcdServer(t)
+	t.Cleanup(terminate)
+	storagetesting.RunTestGetListNonRecursive(ctx, t, compactStorage(cacher, server.V3Client), cacher)
+}
+
+func TestGetListRecursivePrefix(t *testing.T) {
+	ctx, store, _ := testSetup(t)
+	storagetesting.RunTestGetListRecursivePrefix(ctx, t, store)
 }
 
 func checkStorageCalls(t *testing.T, pageSize, estimatedProcessedObjects uint64) {
@@ -214,7 +242,7 @@ func TestListInconsistentContinuation(t *testing.T) {
 	storagetesting.RunTestListInconsistentContinuation(ctx, t, cacher, nil)
 }
 
-func TestConsistentList(t *testing.T) {
+func TestListResourceVersionMatch(t *testing.T) {
 	// TODO(#109831): Enable use of this test and run it.
 }
 
@@ -441,14 +469,25 @@ func testSetupWithEtcdServer(t *testing.T, opts ...setupOption) (context.Context
 		t.Fatalf("Failed to inject list errors: %v", err)
 	}
 
+	if utilfeature.DefaultFeatureGate.Enabled(features.ResilientWatchCacheInitialization) {
+		// The tests assume that Get/GetList/Watch calls shouldn't fail.
+		// However, 429 error can now be returned if watchcache is under initialization.
+		// To avoid rewriting all tests, we wait for watchcache to initialize.
+		if err := cacher.Wait(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	return ctx, cacher, server, terminate
 }
 
 func testSetupWithEtcdAndCreateWrapper(t *testing.T, opts ...setupOption) (storage.Interface, tearDownFunc) {
 	_, cacher, _, tearDown := testSetupWithEtcdServer(t, opts...)
 
-	if err := cacher.ready.wait(context.TODO()); err != nil {
-		t.Fatalf("unexpected error waiting for the cache to be ready")
+	if !utilfeature.DefaultFeatureGate.Enabled(features.ResilientWatchCacheInitialization) {
+		if err := cacher.ready.wait(context.TODO()); err != nil {
+			t.Fatalf("unexpected error waiting for the cache to be ready")
+		}
 	}
 	return &createWrapper{Cacher: cacher}, tearDown
 }

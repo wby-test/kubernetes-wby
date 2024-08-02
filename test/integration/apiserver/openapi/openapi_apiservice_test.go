@@ -44,7 +44,7 @@ func TestSlowAPIServiceOpenAPIDoesNotBlockHealthCheck(t *testing.T) {
 	defer cancelCtx()
 
 	etcd := framework.SharedEtcd()
-	setupServer := kubeapiservertesting.StartTestServerOrDie(t, nil, nil, etcd)
+	setupServer := kubeapiservertesting.StartTestServerOrDie(t, nil, framework.DefaultTestServerFlags(), etcd)
 	client := generateTestClient(t, setupServer)
 
 	service := testdiscovery.NewFakeService("test-server", client, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +81,7 @@ func TestSlowAPIServiceOpenAPIDoesNotBlockHealthCheck(t *testing.T) {
 	require.NoError(t, registerAPIService(ctx, client, groupVersion, service))
 
 	setupServer.TearDownFn()
-	server := kubeapiservertesting.StartTestServerOrDie(t, nil, nil, etcd)
+	server := kubeapiservertesting.StartTestServerOrDie(t, nil, framework.DefaultTestServerFlags(), etcd)
 	t.Cleanup(server.TearDownFn)
 	client2 := generateTestClient(t, server)
 
@@ -100,7 +100,7 @@ func TestFetchingOpenAPIBeforeReady(t *testing.T) {
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	defer cancelCtx()
 
-	server := kubeapiservertesting.StartTestServerOrDie(t, nil, nil, framework.SharedEtcd())
+	server := kubeapiservertesting.StartTestServerOrDie(t, nil, framework.DefaultTestServerFlags(), framework.SharedEtcd())
 	t.Cleanup(server.TearDownFn)
 	client := generateTestClient(t, server)
 
@@ -119,7 +119,7 @@ func TestFetchingOpenAPIBeforeReady(t *testing.T) {
 			SwaggerProps: spec.SwaggerProps{
 				Paths: &spec.Paths{
 					Paths: map[string]spec.PathItem{
-						"/apis/wardle.example.com/v1alpha1": {},
+						"/apis/wardle.example.com/v1alpha1/": {},
 					},
 				},
 			},
@@ -150,7 +150,7 @@ func TestFetchingOpenAPIBeforeReady(t *testing.T) {
 		require.NoError(t, err)
 		var openapi spec.Swagger
 		require.NoError(t, openapi.UnmarshalJSON(b))
-		if _, ok := openapi.Paths.Paths["/apis/wardle.example.com/v1alpha1"]; ok {
+		if _, ok := openapi.Paths.Paths["/apis/wardle.example.com/v1alpha1/"]; ok {
 			return true, nil
 		}
 		return false, nil

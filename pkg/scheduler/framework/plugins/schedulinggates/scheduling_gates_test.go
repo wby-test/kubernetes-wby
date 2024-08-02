@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/require"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
@@ -30,41 +31,26 @@ import (
 
 func TestPreEnqueue(t *testing.T) {
 	tests := []struct {
-		name                         string
-		pod                          *v1.Pod
-		enablePodSchedulingReadiness bool
-		want                         *framework.Status
+		name string
+		pod  *v1.Pod
+		want *framework.Status
 	}{
 		{
-			name:                         "pod does not carry scheduling gates, feature disabled",
-			pod:                          st.MakePod().Name("p").Obj(),
-			enablePodSchedulingReadiness: false,
-			want:                         nil,
+			name: "pod does not carry scheduling gates",
+			pod:  st.MakePod().Name("p").Obj(),
+			want: nil,
 		},
 		{
-			name:                         "pod does not carry scheduling gates, feature enabled",
-			pod:                          st.MakePod().Name("p").Obj(),
-			enablePodSchedulingReadiness: true,
-			want:                         nil,
-		},
-		{
-			name:                         "pod carries scheduling gates, feature disabled",
-			pod:                          st.MakePod().Name("p").SchedulingGates([]string{"foo", "bar"}).Obj(),
-			enablePodSchedulingReadiness: false,
-			want:                         nil,
-		},
-		{
-			name:                         "pod carries scheduling gates, feature enabled",
-			pod:                          st.MakePod().Name("p").SchedulingGates([]string{"foo", "bar"}).Obj(),
-			enablePodSchedulingReadiness: true,
-			want:                         framework.NewStatus(framework.UnschedulableAndUnresolvable, "waiting for scheduling gates: [foo bar]"),
+			name: "pod carries scheduling gates",
+			pod:  st.MakePod().Name("p").SchedulingGates([]string{"foo", "bar"}).Obj(),
+			want: framework.NewStatus(framework.UnschedulableAndUnresolvable, "waiting for scheduling gates: [foo bar]"),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, ctx := ktesting.NewTestContext(t)
-			p, err := New(ctx, nil, nil, feature.Features{EnablePodSchedulingReadiness: tt.enablePodSchedulingReadiness})
+			p, err := New(ctx, nil, nil, feature.Features{})
 			if err != nil {
 				t.Fatalf("Creating plugin: %v", err)
 			}
@@ -73,6 +59,63 @@ func TestPreEnqueue(t *testing.T) {
 			if diff := cmp.Diff(tt.want, got); diff != "" {
 				t.Errorf("unexpected status (-want, +got):\n%s", diff)
 			}
+		})
+	}
+}
+
+func Test_isSchedulableAfterPodChange(t *testing.T) {
+	testcases := map[string]struct {
+		pod            *v1.Pod
+		oldObj, newObj interface{}
+		expectedHint   framework.QueueingHint
+		expectedErr    bool
+	}{
+		"backoff-wrong-old-object": {
+			pod:          &v1.Pod{},
+			oldObj:       "not-a-pod",
+			expectedHint: framework.Queue,
+			expectedErr:  true,
+		},
+		"backoff-wrong-new-object": {
+			pod:          &v1.Pod{},
+			newObj:       "not-a-pod",
+			expectedHint: framework.Queue,
+			expectedErr:  true,
+		},
+		"skip-queue-on-other-pod-updated": {
+			pod:          st.MakePod().Name("p").SchedulingGates([]string{"foo", "bar"}).UID("uid0").Obj(),
+			oldObj:       st.MakePod().Name("p1").SchedulingGates([]string{"foo", "bar"}).UID("uid1").Obj(),
+			newObj:       st.MakePod().Name("p1").SchedulingGates([]string{"foo"}).UID("uid1").Obj(),
+			expectedHint: framework.QueueSkip,
+		},
+		"skip-queue-on-gates-not-empty": {
+			pod:          st.MakePod().Name("p").SchedulingGates([]string{"foo", "bar"}).Obj(),
+			oldObj:       st.MakePod().Name("p").SchedulingGates([]string{"foo", "bar"}).Obj(),
+			newObj:       st.MakePod().Name("p").SchedulingGates([]string{"foo"}).Obj(),
+			expectedHint: framework.QueueSkip,
+		},
+		"queue-on-gates-become-empty": {
+			pod:          st.MakePod().Name("p").SchedulingGates([]string{"foo"}).Obj(),
+			oldObj:       st.MakePod().Name("p").SchedulingGates([]string{"foo"}).Obj(),
+			newObj:       st.MakePod().Name("p").SchedulingGates([]string{}).Obj(),
+			expectedHint: framework.Queue,
+		},
+	}
+
+	for name, tc := range testcases {
+		t.Run(name, func(t *testing.T) {
+			logger, ctx := ktesting.NewTestContext(t)
+			p, err := New(ctx, nil, nil, feature.Features{})
+			if err != nil {
+				t.Fatalf("Creating plugin: %v", err)
+			}
+			actualHint, err := p.(*SchedulingGates).isSchedulableAfterPodChange(logger, tc.pod, tc.oldObj, tc.newObj)
+			if tc.expectedErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.expectedHint, actualHint)
 		})
 	}
 }

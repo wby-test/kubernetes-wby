@@ -31,6 +31,7 @@ import (
 	"k8s.io/klog/v2"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
+	"k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 	"k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/validation"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
 	cmdutil "k8s.io/kubernetes/cmd/kubeadm/app/cmd/util"
@@ -88,8 +89,11 @@ func newCmdDiff(out io.Writer) *cobra.Command {
 	options.AddKubeConfigFlag(cmd.Flags(), &flags.kubeConfigPath)
 	options.AddConfigFlag(cmd.Flags(), &flags.cfgPath)
 	cmd.Flags().StringVar(&flags.apiServerManifestPath, "api-server-manifest", defaultAPIServerManifestPath, "path to API server manifest")
+	cmd.Flags().MarkDeprecated("api-server-manifest", "This flag is deprecated and will be removed in a future release.")
 	cmd.Flags().StringVar(&flags.controllerManagerManifestPath, "controller-manager-manifest", defaultControllerManagerManifestPath, "path to controller manifest")
+	cmd.Flags().MarkDeprecated("controller-manager-manifest", "This flag is deprecated and will be removed in a future release.")
 	cmd.Flags().StringVar(&flags.schedulerManifestPath, "scheduler-manifest", defaultSchedulerManifestPath, "path to scheduler manifest")
+	cmd.Flags().MarkDeprecated("scheduler-manifest", "This flag is deprecated and will be removed in a future release.")
 	cmd.Flags().IntVarP(&flags.contextLines, "context-lines", "c", 3, "How many lines of context in the diff")
 
 	return cmd
@@ -118,7 +122,9 @@ func validateManifestsPath(manifests ...string) (err error) {
 type FetchInitConfigurationFunc func(client clientset.Interface, printer output.Printer, logPrefix string, newControlPlane, skipComponentConfigs bool) (*kubeadmapi.InitConfiguration, error)
 
 func runDiff(fs *pflag.FlagSet, flags *diffFlags, args []string, fetchInitConfigurationFromCluster FetchInitConfigurationFunc) error {
-	upgradeCfg, err := configutil.LoadUpgradeConfig(flags.cfgPath)
+	externalCfg := &v1beta4.UpgradeConfiguration{}
+	opt := configutil.LoadOrDefaultConfigurationOptions{}
+	upgradeCfg, err := configutil.LoadOrDefaultUpgradeConfiguration(flags.cfgPath, externalCfg, opt)
 	if err != nil {
 		return err
 	}

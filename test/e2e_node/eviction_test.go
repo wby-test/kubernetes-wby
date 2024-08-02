@@ -31,7 +31,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	kubeletstatsv1alpha1 "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
-	"k8s.io/kubernetes/pkg/features"
 	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	"k8s.io/kubernetes/pkg/kubelet/eviction"
 	evictionapi "k8s.io/kubernetes/pkg/kubelet/eviction/api"
@@ -45,6 +44,7 @@ import (
 	testutils "k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 	admissionapi "k8s.io/pod-security-admission/api"
+	"k8s.io/utils/ptr"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -475,6 +475,7 @@ var _ = SIGDescribe("PriorityPidEvictionOrdering", framework.WithSlow(), framewo
 
 	highPriorityClassName := f.BaseName + "-high-priority"
 	highPriority := int32(999999999)
+	processes := 30000
 
 	ginkgo.Context(fmt.Sprintf(testContextFmt, expectedNodeCondition), func() {
 		tempSetCurrentKubeletConfig(f, func(ctx context.Context, initialConfig *kubeletconfig.KubeletConfiguration) {
@@ -497,7 +498,7 @@ var _ = SIGDescribe("PriorityPidEvictionOrdering", framework.WithSlow(), framewo
 		specs := []podEvictSpec{
 			{
 				evictionPriority: 2,
-				pod:              pidConsumingPod("fork-bomb-container-with-low-priority", 12000),
+				pod:              pidConsumingPod("fork-bomb-container-with-low-priority", processes),
 			},
 			{
 				evictionPriority: 0,
@@ -505,7 +506,7 @@ var _ = SIGDescribe("PriorityPidEvictionOrdering", framework.WithSlow(), framewo
 			},
 			{
 				evictionPriority: 1,
-				pod:              pidConsumingPod("fork-bomb-container-with-high-priority", 12000),
+				pod:              pidConsumingPod("fork-bomb-container-with-high-priority", processes),
 			},
 		}
 		specs[1].pod.Spec.PriorityClassName = highPriorityClassName
@@ -513,23 +514,19 @@ var _ = SIGDescribe("PriorityPidEvictionOrdering", framework.WithSlow(), framewo
 		runEvictionTest(f, pressureTimeout, expectedNodeCondition, expectedStarvedResource, logPidMetrics, specs)
 	})
 
-	f.Context(fmt.Sprintf(testContextFmt, expectedNodeCondition)+"; PodDisruptionConditions enabled", nodefeature.PodDisruptionConditions, func() {
+	f.Context(fmt.Sprintf(testContextFmt, expectedNodeCondition)+"; baseline scenario to verify DisruptionTarget is added", func() {
 		tempSetCurrentKubeletConfig(f, func(ctx context.Context, initialConfig *kubeletconfig.KubeletConfiguration) {
 			pidsConsumed := int64(10000)
 			summary := eventuallyGetSummary(ctx)
 			availablePids := *(summary.Node.Rlimit.MaxPID) - *(summary.Node.Rlimit.NumOfRunningProcesses)
 			initialConfig.EvictionHard = map[string]string{string(evictionapi.SignalPIDAvailable): fmt.Sprintf("%d", availablePids-pidsConsumed)}
 			initialConfig.EvictionMinimumReclaim = map[string]string{}
-			initialConfig.FeatureGates = map[string]bool{
-				string(features.PodDisruptionConditions): true,
-			}
 		})
-		disruptionTarget := v1.DisruptionTarget
 		specs := []podEvictSpec{
 			{
 				evictionPriority:           1,
-				pod:                        pidConsumingPod("fork-bomb-container", 30000),
-				wantPodDisruptionCondition: &disruptionTarget,
+				pod:                        pidConsumingPod("fork-bomb-container", processes),
+				wantPodDisruptionCondition: ptr.To(v1.DisruptionTarget),
 			},
 		}
 		runEvictionTest(f, pressureTimeout, expectedNodeCondition, expectedStarvedResource, logPidMetrics, specs)
@@ -969,6 +966,19 @@ func innocentPod() *v1.Pod {
 						"sh",
 						"-c",
 						"while true; do sleep 5; done",
+					},
+					Resources: v1.ResourceRequirements{
+						// These values are set so that we don't consider this pod to be over the limits
+						// If the requests are not set, then we assume a request limit of 0 so it is always over.
+						// This fixes this for the innocent pod.
+						Requests: v1.ResourceList{
+							v1.ResourceEphemeralStorage: resource.MustParse("50Mi"),
+							v1.ResourceMemory:           resource.MustParse("50Mi"),
+						},
+						Limits: v1.ResourceList{
+							v1.ResourceEphemeralStorage: resource.MustParse("50Mi"),
+							v1.ResourceMemory:           resource.MustParse("50Mi"),
+						},
 					},
 				},
 			},

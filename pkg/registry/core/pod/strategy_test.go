@@ -22,10 +22,12 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -36,10 +38,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/apiserver/pkg/warning"
 	"k8s.io/client-go/tools/cache"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
-	utilpointer "k8s.io/utils/pointer"
+	ptr "k8s.io/utils/ptr"
 
+	podtest "k8s.io/kubernetes/pkg/api/pod/testing"
 	apitesting "k8s.io/kubernetes/pkg/api/testing"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/features"
@@ -314,41 +318,22 @@ func TestGetPodQOS(t *testing.T) {
 
 func TestSchedulingGatedCondition(t *testing.T) {
 	tests := []struct {
-		name           string
-		pod            *api.Pod
-		featureEnabled bool
-		want           api.PodCondition
+		name string
+		pod  *api.Pod
+		want api.PodCondition
 	}{
 		{
-			name:           "pod without .spec.schedulingGates, feature disabled",
-			pod:            &api.Pod{},
-			featureEnabled: false,
-			want:           api.PodCondition{},
+			name: "pod without .spec.schedulingGates",
+			pod:  &api.Pod{},
+			want: api.PodCondition{},
 		},
 		{
-			name:           "pod without .spec.schedulingGates, feature enabled",
-			pod:            &api.Pod{},
-			featureEnabled: true,
-			want:           api.PodCondition{},
-		},
-		{
-			name: "pod with .spec.schedulingGates, feature disabled",
+			name: "pod with .spec.schedulingGates",
 			pod: &api.Pod{
 				Spec: api.PodSpec{
 					SchedulingGates: []api.PodSchedulingGate{{Name: "foo"}},
 				},
 			},
-			featureEnabled: false,
-			want:           api.PodCondition{},
-		},
-		{
-			name: "pod with .spec.schedulingGates, feature enabled",
-			pod: &api.Pod{
-				Spec: api.PodSpec{
-					SchedulingGates: []api.PodSchedulingGate{{Name: "foo"}},
-				},
-			},
-			featureEnabled: true,
 			want: api.PodCondition{
 				Type:    api.PodScheduled,
 				Status:  api.ConditionFalse,
@@ -360,8 +345,6 @@ func TestSchedulingGatedCondition(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodSchedulingReadiness, tt.featureEnabled)()
-
 			Strategy.PrepareForCreate(genericapirequest.NewContext(), tt.pod)
 			var got api.PodCondition
 			for _, condition := range tt.pod.Status.Conditions {
@@ -371,7 +354,10 @@ func TestSchedulingGatedCondition(t *testing.T) {
 				}
 			}
 
-			if diff := cmp.Diff(tt.want, got); diff != "" {
+			if got.LastTransitionTime.IsZero() && got.Type != "" {
+				t.Errorf("unexpected empty LastTransitionTime in condition")
+			}
+			if diff := cmp.Diff(tt.want, got, cmpopts.IgnoreFields(api.PodCondition{}, "LastTransitionTime")); diff != "" {
 				t.Errorf("unexpected field errors (-want, +got):\n%s", diff)
 			}
 		})
@@ -436,7 +422,7 @@ func TestCheckGracefulDelete(t *testing.T) {
 			pod: &api.Pod{
 				Spec: api.PodSpec{
 					NodeName:                      "something",
-					TerminationGracePeriodSeconds: utilpointer.Int64(-1),
+					TerminationGracePeriodSeconds: ptr.To[int64](-1),
 				},
 				Status: api.PodStatus{},
 			},
@@ -447,7 +433,7 @@ func TestCheckGracefulDelete(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			out := &metav1.DeleteOptions{}
 			if tc.deleteGracePeriod != nil {
-				out.GracePeriodSeconds = utilpointer.Int64(*tc.deleteGracePeriod)
+				out.GracePeriodSeconds = ptr.To[int64](*tc.deleteGracePeriod)
 			}
 			Strategy.CheckGracefulDelete(genericapirequest.NewContext(), tc.pod, out)
 			if out.GracePeriodSeconds == nil {
@@ -842,33 +828,24 @@ func TestPodIndexFunc(t *testing.T) {
 }
 
 func newPodWithHugePageValue(resourceName api.ResourceName, value resource.Quantity) *api.Pod {
-	return &api.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:       "default",
-			Name:            "foo",
-			ResourceVersion: "1",
-		},
-		Spec: api.PodSpec{
-			RestartPolicy: api.RestartPolicyAlways,
-			DNSPolicy:     api.DNSDefault,
-			Containers: []api.Container{{
-				Name:                     "foo",
-				Image:                    "image",
-				ImagePullPolicy:          "IfNotPresent",
-				TerminationMessagePolicy: "File",
-				Resources: api.ResourceRequirements{
-					Requests: api.ResourceList{
-						api.ResourceCPU: resource.MustParse("10"),
-						resourceName:    value,
-					},
-					Limits: api.ResourceList{
-						api.ResourceCPU: resource.MustParse("10"),
-						resourceName:    value,
-					},
-				}},
-			},
-		},
-	}
+	return podtest.MakePod("", podtest.SetObjectMeta(metav1.ObjectMeta{
+		Namespace:       "default",
+		Name:            "foo",
+		ResourceVersion: "1",
+	}),
+		podtest.SetContainers(podtest.MakeContainer("foo",
+			podtest.SetContainerResources(api.ResourceRequirements{
+				Requests: api.ResourceList{
+					api.ResourceCPU: resource.MustParse("10"),
+					resourceName:    value,
+				},
+				Limits: api.ResourceList{
+					api.ResourceCPU: resource.MustParse("10"),
+					resourceName:    value,
+				},
+			}),
+		)),
+	)
 }
 
 func TestPodStrategyValidate(t *testing.T) {
@@ -886,102 +863,58 @@ func TestPodStrategyValidate(t *testing.T) {
 		},
 		{
 			name: "a new pod setting init-container with indivisible hugepages values",
-			pod: &api.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default",
-					Name:      "foo",
-				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSDefault,
-					InitContainers: []api.Container{{
-						Name:                     containerName,
-						Image:                    "image",
-						ImagePullPolicy:          "IfNotPresent",
-						TerminationMessagePolicy: "File",
-						Resources: api.ResourceRequirements{
-							Requests: api.ResourceList{
-								api.ResourceName(api.ResourceHugePagesPrefix + "64Ki"): resource.MustParse("127Ki"),
-							},
-							Limits: api.ResourceList{
-								api.ResourceName(api.ResourceHugePagesPrefix + "64Ki"): resource.MustParse("127Ki"),
-							},
-						}},
-					},
-				},
-			},
+			pod: podtest.MakePod("foo",
+				podtest.SetInitContainers(podtest.MakeContainer(containerName, podtest.SetContainerResources(
+					api.ResourceRequirements{
+						Requests: api.ResourceList{
+							api.ResourceName(api.ResourceHugePagesPrefix + "64Ki"): resource.MustParse("127Ki"),
+						},
+						Limits: api.ResourceList{
+							api.ResourceName(api.ResourceHugePagesPrefix + "64Ki"): resource.MustParse("127Ki"),
+						},
+					}))),
+			),
 			wantErr: true,
 		},
 		{
 			name: "a new pod setting init-container with indivisible hugepages values while container with divisible hugepages values",
-			pod: &api.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default",
-					Name:      "foo",
-				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSDefault,
-					InitContainers: []api.Container{{
-						Name:                     containerName,
-						Image:                    "image",
-						ImagePullPolicy:          "IfNotPresent",
-						TerminationMessagePolicy: "File",
-						Resources: api.ResourceRequirements{
-							Requests: api.ResourceList{
-								api.ResourceName(api.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("5.1Mi"),
-							},
-							Limits: api.ResourceList{
-								api.ResourceName(api.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("5.1Mi"),
-							},
-						}},
-					},
-					Containers: []api.Container{{
-						Name:                     containerName,
-						Image:                    "image",
-						ImagePullPolicy:          "IfNotPresent",
-						TerminationMessagePolicy: "File",
-						Resources: api.ResourceRequirements{
-							Requests: api.ResourceList{
-								api.ResourceName(api.ResourceHugePagesPrefix + "1Gi"): resource.MustParse("2Gi"),
-							},
-							Limits: api.ResourceList{
-								api.ResourceName(api.ResourceHugePagesPrefix + "1Gi"): resource.MustParse("2Gi"),
-							},
-						}},
-					},
-				},
-			},
+			pod: podtest.MakePod("foo",
+				podtest.SetInitContainers(podtest.MakeContainer(containerName, podtest.SetContainerResources(
+					api.ResourceRequirements{
+						Requests: api.ResourceList{
+							api.ResourceName(api.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("5.1Mi"),
+						},
+						Limits: api.ResourceList{
+							api.ResourceName(api.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("5.1Mi"),
+						},
+					}))),
+				podtest.SetContainers(podtest.MakeContainer(containerName, podtest.SetContainerResources(
+					api.ResourceRequirements{
+						Requests: api.ResourceList{
+							api.ResourceName(api.ResourceHugePagesPrefix + "1Gi"): resource.MustParse("2Gi"),
+						},
+						Limits: api.ResourceList{
+							api.ResourceName(api.ResourceHugePagesPrefix + "1Gi"): resource.MustParse("2Gi"),
+						},
+					}))),
+			),
 			wantErr: true,
 		},
 		{
 			name: "a new pod setting container with divisible hugepages values",
-			pod: &api.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default",
-					Name:      "foo",
-				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSDefault,
-					Containers: []api.Container{{
-						Name:                     containerName,
-						Image:                    "image",
-						ImagePullPolicy:          "IfNotPresent",
-						TerminationMessagePolicy: "File",
-						Resources: api.ResourceRequirements{
-							Requests: api.ResourceList{
-								api.ResourceName(api.ResourceCPU):                     resource.MustParse("10"),
-								api.ResourceName(api.ResourceHugePagesPrefix + "1Mi"): resource.MustParse("2Mi"),
-							},
-							Limits: api.ResourceList{
-								api.ResourceName(api.ResourceCPU):                     resource.MustParse("10"),
-								api.ResourceName(api.ResourceHugePagesPrefix + "1Mi"): resource.MustParse("2Mi"),
-							},
-						}},
-					},
-				},
-			},
+			pod: podtest.MakePod("foo",
+				podtest.SetContainers(podtest.MakeContainer(containerName, podtest.SetContainerResources(
+					api.ResourceRequirements{
+						Requests: api.ResourceList{
+							api.ResourceName(api.ResourceCPU):                     resource.MustParse("10"),
+							api.ResourceName(api.ResourceHugePagesPrefix + "1Mi"): resource.MustParse("2Mi"),
+						},
+						Limits: api.ResourceList{
+							api.ResourceName(api.ResourceCPU):                     resource.MustParse("10"),
+							api.ResourceName(api.ResourceHugePagesPrefix + "1Mi"): resource.MustParse("2Mi"),
+						},
+					}))),
+			),
 		},
 	}
 
@@ -1007,54 +940,20 @@ func TestEphemeralContainerStrategyValidateUpdate(t *testing.T) {
 	}{
 		{
 			name: "add ephemeral container to regular pod and expect success",
-			oldPod: &api.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test-pod",
-					Namespace:       "test-ns",
-					ResourceVersion: "1",
-				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSDefault,
-					Containers: []api.Container{
-						{
-							Name:                     "container",
-							Image:                    "image",
-							ImagePullPolicy:          "IfNotPresent",
-							TerminationMessagePolicy: "File",
-						},
+			oldPod: podtest.MakePod("test-pod",
+				podtest.SetResourceVersion("1"),
+			),
+			newPod: podtest.MakePod("test-pod",
+				podtest.SetResourceVersion("1"),
+				podtest.SetEphemeralContainers(api.EphemeralContainer{
+					EphemeralContainerCommon: api.EphemeralContainerCommon{
+						Name:                     "debugger",
+						Image:                    "image",
+						ImagePullPolicy:          "IfNotPresent",
+						TerminationMessagePolicy: "File",
 					},
-				},
-			},
-			newPod: &api.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test-pod",
-					Namespace:       "test-ns",
-					ResourceVersion: "1",
-				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSDefault,
-					Containers: []api.Container{
-						{
-							Name:                     "container",
-							Image:                    "image",
-							ImagePullPolicy:          "IfNotPresent",
-							TerminationMessagePolicy: "File",
-						},
-					},
-					EphemeralContainers: []api.EphemeralContainer{
-						{
-							EphemeralContainerCommon: api.EphemeralContainerCommon{
-								Name:                     "debugger",
-								Image:                    "image",
-								ImagePullPolicy:          "IfNotPresent",
-								TerminationMessagePolicy: "File",
-							},
-						},
-					},
-				},
-			},
+				}),
+			),
 		},
 	}
 
@@ -1074,170 +973,64 @@ func TestEphemeralContainerStrategyValidateUpdate(t *testing.T) {
 	}{
 		{
 			name: "add ephemeral container to static pod and expect failure",
-			oldPod: &api.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test-pod",
-					Namespace:       "test-ns",
-					ResourceVersion: "1",
-					Annotations:     map[string]string{api.MirrorPodAnnotationKey: "someVal"},
-				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSDefault,
-					Containers: []api.Container{
-						{
-							Name:                     "container",
-							Image:                    "image",
-							ImagePullPolicy:          "IfNotPresent",
-							TerminationMessagePolicy: "File",
-						},
+			oldPod: podtest.MakePod("test-pod",
+				podtest.SetAnnotations(map[string]string{api.MirrorPodAnnotationKey: "someVal"}),
+				podtest.SetNodeName("example.com"),
+			),
+			newPod: podtest.MakePod("test-pod",
+				podtest.SetAnnotations(map[string]string{api.MirrorPodAnnotationKey: "someVal"}),
+				podtest.SetEphemeralContainers(api.EphemeralContainer{
+					EphemeralContainerCommon: api.EphemeralContainerCommon{
+						Name:                     "debugger",
+						Image:                    "image",
+						ImagePullPolicy:          "IfNotPresent",
+						TerminationMessagePolicy: "File",
 					},
-					NodeName: "example.com",
-				},
-			},
-			newPod: &api.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test-pod",
-					Namespace:       "test-ns",
-					ResourceVersion: "1",
-					Annotations:     map[string]string{api.MirrorPodAnnotationKey: "someVal"},
-				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSDefault,
-					Containers: []api.Container{
-						{
-							Name:                     "container",
-							Image:                    "image",
-							ImagePullPolicy:          "IfNotPresent",
-							TerminationMessagePolicy: "File",
-						},
-					},
-					EphemeralContainers: []api.EphemeralContainer{
-						{
-							EphemeralContainerCommon: api.EphemeralContainerCommon{
-								Name:                     "debugger",
-								Image:                    "image",
-								ImagePullPolicy:          "IfNotPresent",
-								TerminationMessagePolicy: "File",
-							},
-						},
-					},
-					NodeName: "example.com",
-				},
-			},
+				}),
+				podtest.SetNodeName("example.com"),
+			),
 		},
 		{
 			name: "remove ephemeral container from regular pod and expect failure",
-			newPod: &api.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test-pod",
-					Namespace:       "test-ns",
-					ResourceVersion: "1",
-				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSDefault,
-					Containers: []api.Container{
-						{
-							Name:                     "container",
-							Image:                    "image",
-							ImagePullPolicy:          "IfNotPresent",
-							TerminationMessagePolicy: "File",
-						},
+			newPod: podtest.MakePod("test-pod",
+				podtest.SetResourceVersion("1"),
+			),
+			oldPod: podtest.MakePod("test-pod",
+				podtest.SetResourceVersion("1"),
+				podtest.SetEphemeralContainers(api.EphemeralContainer{
+					EphemeralContainerCommon: api.EphemeralContainerCommon{
+						Name:                     "debugger",
+						Image:                    "image",
+						ImagePullPolicy:          "IfNotPresent",
+						TerminationMessagePolicy: "File",
 					},
-				},
-			},
-			oldPod: &api.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test-pod",
-					Namespace:       "test-ns",
-					ResourceVersion: "1",
-				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSDefault,
-					Containers: []api.Container{
-						{
-							Name:                     "container",
-							Image:                    "image",
-							ImagePullPolicy:          "IfNotPresent",
-							TerminationMessagePolicy: "File",
-						},
-					},
-					EphemeralContainers: []api.EphemeralContainer{
-						{
-							EphemeralContainerCommon: api.EphemeralContainerCommon{
-								Name:                     "debugger",
-								Image:                    "image",
-								ImagePullPolicy:          "IfNotPresent",
-								TerminationMessagePolicy: "File",
-							},
-						},
-					},
-				},
-			},
+				}),
+			),
 		},
 		{
 			name: "change ephemeral container from regular pod and expect failure",
-			newPod: &api.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test-pod",
-					Namespace:       "test-ns",
-					ResourceVersion: "1",
-				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSDefault,
-					Containers: []api.Container{
-						{
-							Name:                     "container",
-							Image:                    "image",
-							ImagePullPolicy:          "IfNotPresent",
-							TerminationMessagePolicy: "File",
-						},
+			newPod: podtest.MakePod("test-pod",
+				podtest.SetResourceVersion("1"),
+				podtest.SetEphemeralContainers(api.EphemeralContainer{
+					EphemeralContainerCommon: api.EphemeralContainerCommon{
+						Name:                     "debugger",
+						Image:                    "image2",
+						ImagePullPolicy:          "IfNotPresent",
+						TerminationMessagePolicy: "File",
 					},
-					EphemeralContainers: []api.EphemeralContainer{
-						{
-							EphemeralContainerCommon: api.EphemeralContainerCommon{
-								Name:                     "debugger",
-								Image:                    "image2",
-								ImagePullPolicy:          "IfNotPresent",
-								TerminationMessagePolicy: "File",
-							},
-						},
+				}),
+			),
+			oldPod: podtest.MakePod("test-pod",
+				podtest.SetResourceVersion("1"),
+				podtest.SetEphemeralContainers(api.EphemeralContainer{
+					EphemeralContainerCommon: api.EphemeralContainerCommon{
+						Name:                     "debugger",
+						Image:                    "image",
+						ImagePullPolicy:          "IfNotPresent",
+						TerminationMessagePolicy: "File",
 					},
-				},
-			},
-			oldPod: &api.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test-pod",
-					Namespace:       "test-ns",
-					ResourceVersion: "1",
-				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSDefault,
-					Containers: []api.Container{
-						{
-							Name:                     "container",
-							Image:                    "image",
-							ImagePullPolicy:          "IfNotPresent",
-							TerminationMessagePolicy: "File",
-						},
-					},
-					EphemeralContainers: []api.EphemeralContainer{
-						{
-							EphemeralContainerCommon: api.EphemeralContainerCommon{
-								Name:                     "debugger",
-								Image:                    "image",
-								ImagePullPolicy:          "IfNotPresent",
-								TerminationMessagePolicy: "File",
-							},
-						},
-					},
-				},
-			},
+				}),
+			),
 		},
 	}
 
@@ -1543,26 +1336,9 @@ func TestNodeInclusionPolicyEnablementInCreating(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeInclusionPolicyInPodTopologySpread, tc.enableNodeInclusionPolicy)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeInclusionPolicyInPodTopologySpread, tc.enableNodeInclusionPolicy)
 
-			pod := &api.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default",
-					Name:      "foo",
-				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSDefault,
-					Containers: []api.Container{
-						{
-							Name:                     "container",
-							Image:                    "image",
-							ImagePullPolicy:          "IfNotPresent",
-							TerminationMessagePolicy: "File",
-						},
-					},
-				},
-			}
+			pod := podtest.MakePod("foo")
 			wantPod := pod.DeepCopy()
 			pod.Spec.TopologySpreadConstraints = append(pod.Spec.TopologySpreadConstraints, tc.topologySpreadConstraints...)
 
@@ -1587,37 +1363,18 @@ func TestNodeInclusionPolicyEnablementInUpdating(t *testing.T) {
 	)
 
 	// Enable the Feature Gate during the first rule creation
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeInclusionPolicyInPodTopologySpread, true)()
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeInclusionPolicyInPodTopologySpread, true)
 	ctx := genericapirequest.NewDefaultContext()
 
-	pod := &api.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:       "default",
-			Name:            "foo",
-			ResourceVersion: "1",
-		},
-		Spec: api.PodSpec{
-			RestartPolicy: api.RestartPolicyAlways,
-			DNSPolicy:     api.DNSDefault,
-			Containers: []api.Container{
-				{
-					Name:                     "container",
-					Image:                    "image",
-					ImagePullPolicy:          "IfNotPresent",
-					TerminationMessagePolicy: "File",
-				},
-			},
-			TopologySpreadConstraints: []api.TopologySpreadConstraint{
-				{
-					NodeAffinityPolicy: &ignore,
-					NodeTaintsPolicy:   &honor,
-					WhenUnsatisfiable:  api.DoNotSchedule,
-					TopologyKey:        "kubernetes.io/hostname",
-					MaxSkew:            1,
-				},
-			},
-		},
-	}
+	pod := podtest.MakePod("foo",
+		podtest.SetTopologySpreadConstraints(api.TopologySpreadConstraint{
+			NodeAffinityPolicy: &ignore,
+			NodeTaintsPolicy:   &honor,
+			WhenUnsatisfiable:  api.DoNotSchedule,
+			TopologyKey:        "kubernetes.io/hostname",
+			MaxSkew:            1,
+		}),
+	)
 
 	errs := Strategy.Validate(ctx, pod)
 	if len(errs) != 0 {
@@ -1634,7 +1391,7 @@ func TestNodeInclusionPolicyEnablementInUpdating(t *testing.T) {
 	}
 
 	// Disable the Feature Gate and expect these fields still exist after updating.
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeInclusionPolicyInPodTopologySpread, false)()
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeInclusionPolicyInPodTopologySpread, false)
 
 	updatedPod := createdPod.DeepCopy()
 	updatedPod.Labels = map[string]string{"foo": "bar"}
@@ -1654,7 +1411,7 @@ func TestNodeInclusionPolicyEnablementInUpdating(t *testing.T) {
 	}
 
 	// Enable the Feature Gate again to check whether configured fields still exist after updating.
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeInclusionPolicyInPodTopologySpread, true)()
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeInclusionPolicyInPodTopologySpread, true)
 
 	updatedPod2 := updatedPod.DeepCopy()
 	updatedPod2.Labels = map[string]string{"foo": "fuz"}
@@ -2021,7 +1778,7 @@ func Test_mutatePodAffinity(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.MatchLabelKeysInPodAffinity, tc.featureGateEnabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.MatchLabelKeysInPodAffinity, tc.featureGateEnabled)
 
 			pod := tc.pod
 			mutatePodAffinity(pod)
@@ -2112,7 +1869,7 @@ func TestPodLifecycleSleepActionEnablement(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodLifecycleSleepAction, tc.gateEnabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodLifecycleSleepAction, tc.gateEnabled)
 
 			newPod := tc.newPod
 
@@ -2126,4 +1883,569 @@ func TestPodLifecycleSleepActionEnablement(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApplyAppArmorVersionSkew(t *testing.T) {
+	testProfile := "test"
+
+	tests := []struct {
+		description   string
+		pod           *api.Pod
+		validation    func(*testing.T, *api.Pod)
+		expectWarning bool
+	}{{
+		description: "Security context nil",
+		pod: &api.Pod{
+			Spec: api.PodSpec{
+				InitContainers: []api.Container{{Name: "init"}},
+				Containers:     []api.Container{{Name: "ctr"}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Empty(t, pod.Annotations)
+			assert.Nil(t, pod.Spec.SecurityContext)
+		},
+	}, {
+		description: "Security context not nil",
+		pod: &api.Pod{
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{},
+				InitContainers:  []api.Container{{Name: "init"}},
+				Containers:      []api.Container{{Name: "ctr"}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Empty(t, pod.Annotations)
+			assert.Nil(t, pod.Spec.SecurityContext.AppArmorProfile)
+		},
+	}, {
+		description: "Pod field unconfined and no annotation present",
+		pod: &api.Pod{
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{
+					AppArmorProfile: &api.AppArmorProfile{
+						Type: api.AppArmorProfileTypeUnconfined,
+					},
+				},
+				InitContainers: []api.Container{{Name: "init"}},
+				Containers:     []api.Container{{Name: "ctr"}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "init": api.DeprecatedAppArmorAnnotationValueUnconfined,
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr":  api.DeprecatedAppArmorAnnotationValueUnconfined,
+			}, pod.Annotations)
+		},
+	}, {
+		description: "Pod field default and no annotation present",
+		pod: &api.Pod{
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{
+					AppArmorProfile: &api.AppArmorProfile{
+						Type: api.AppArmorProfileTypeRuntimeDefault,
+					},
+				},
+				InitContainers: []api.Container{{Name: "init"}},
+				Containers:     []api.Container{{Name: "ctr"}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "init": api.DeprecatedAppArmorAnnotationValueRuntimeDefault,
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr":  api.DeprecatedAppArmorAnnotationValueRuntimeDefault,
+			}, pod.Annotations)
+		},
+	}, {
+		description: "Pod field localhost and no annotation present",
+		pod: &api.Pod{
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{
+					AppArmorProfile: &api.AppArmorProfile{
+						Type:             api.AppArmorProfileTypeLocalhost,
+						LocalhostProfile: &testProfile,
+					},
+				},
+				InitContainers: []api.Container{{Name: "init"}},
+				Containers:     []api.Container{{Name: "ctr"}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "init": api.DeprecatedAppArmorAnnotationValueLocalhostPrefix + testProfile,
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr":  api.DeprecatedAppArmorAnnotationValueLocalhostPrefix + testProfile,
+			}, pod.Annotations)
+		},
+	}, {
+		description: "Pod field localhost but profile is nil",
+		pod: &api.Pod{
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{
+					AppArmorProfile: &api.AppArmorProfile{
+						Type: api.AppArmorProfileTypeLocalhost,
+					},
+				},
+				InitContainers: []api.Container{{Name: "init"}},
+				Containers:     []api.Container{{Name: "ctr"}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Empty(t, pod.Annotations)
+		},
+	}, {
+		description: "Container security context not nil",
+		pod: &api.Pod{
+			Spec: api.PodSpec{
+				Containers: []api.Container{{
+					Name:            "ctr",
+					SecurityContext: &api.SecurityContext{},
+				}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Empty(t, pod.Annotations)
+		},
+	}, {
+		description: "Container field RuntimeDefault and no annotation present",
+		pod: &api.Pod{
+			Spec: api.PodSpec{
+				Containers: []api.Container{{
+					Name: "ctr",
+					SecurityContext: &api.SecurityContext{
+						AppArmorProfile: &api.AppArmorProfile{
+							Type: api.AppArmorProfileTypeRuntimeDefault,
+						},
+					},
+				}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueRuntimeDefault,
+			}, pod.Annotations)
+			assert.Nil(t, pod.Spec.SecurityContext)
+			assert.Equal(t, api.AppArmorProfileTypeRuntimeDefault, pod.Spec.Containers[0].SecurityContext.AppArmorProfile.Type)
+		},
+	}, {
+		description: "Container field localhost and no annotation present",
+		pod: &api.Pod{
+			Spec: api.PodSpec{
+				Containers: []api.Container{{
+					Name: "ctr",
+					SecurityContext: &api.SecurityContext{
+						AppArmorProfile: &api.AppArmorProfile{
+							Type:             api.AppArmorProfileTypeLocalhost,
+							LocalhostProfile: &testProfile,
+						},
+					},
+				}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueLocalhostPrefix + testProfile,
+			}, pod.Annotations)
+			assert.Nil(t, pod.Spec.SecurityContext)
+			assert.Equal(t, api.AppArmorProfileTypeLocalhost, pod.Spec.Containers[0].SecurityContext.AppArmorProfile.Type)
+		},
+	}, {
+		description: "Container overrides pod profile",
+		pod: &api.Pod{
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{
+					AppArmorProfile: &api.AppArmorProfile{
+						Type: api.AppArmorProfileTypeRuntimeDefault,
+					},
+				},
+				Containers: []api.Container{{
+					Name: "ctr",
+					SecurityContext: &api.SecurityContext{
+						AppArmorProfile: &api.AppArmorProfile{
+							Type: api.AppArmorProfileTypeUnconfined,
+						},
+					},
+				}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueUnconfined,
+			}, pod.Annotations)
+			assert.Equal(t, api.AppArmorProfileTypeRuntimeDefault, pod.Spec.SecurityContext.AppArmorProfile.Type)
+			assert.Equal(t, api.AppArmorProfileTypeUnconfined, pod.Spec.Containers[0].SecurityContext.AppArmorProfile.Type)
+		},
+	}, {
+		description: "Multiple containers with fields (container)",
+		pod: &api.Pod{
+			Spec: api.PodSpec{
+				InitContainers: []api.Container{{
+					Name: "init",
+					SecurityContext: &api.SecurityContext{
+						AppArmorProfile: &api.AppArmorProfile{
+							Type:             api.AppArmorProfileTypeLocalhost,
+							LocalhostProfile: &testProfile,
+						},
+					},
+				}},
+				Containers: []api.Container{{
+					Name: "a",
+					SecurityContext: &api.SecurityContext{
+						AppArmorProfile: &api.AppArmorProfile{
+							Type: api.AppArmorProfileTypeUnconfined,
+						},
+					},
+				}, {
+					Name: "b",
+				}, {
+					Name: "c",
+					SecurityContext: &api.SecurityContext{
+						AppArmorProfile: &api.AppArmorProfile{
+							Type: api.AppArmorProfileTypeRuntimeDefault,
+						},
+					},
+				}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "init": api.DeprecatedAppArmorAnnotationValueLocalhostPrefix + testProfile,
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "a":    api.DeprecatedAppArmorAnnotationValueUnconfined,
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "c":    api.DeprecatedAppArmorAnnotationValueRuntimeDefault,
+			}, pod.Annotations)
+			assert.Nil(t, pod.Spec.SecurityContext)
+			assert.Equal(t, api.AppArmorProfileTypeLocalhost, pod.Spec.InitContainers[0].SecurityContext.AppArmorProfile.Type)
+			assert.Equal(t, api.AppArmorProfileTypeUnconfined, pod.Spec.Containers[0].SecurityContext.AppArmorProfile.Type)
+			assert.Nil(t, pod.Spec.Containers[1].SecurityContext)
+			assert.Equal(t, api.AppArmorProfileTypeRuntimeDefault, pod.Spec.Containers[2].SecurityContext.AppArmorProfile.Type)
+		},
+	}, {
+		description: "Annotation 'unconfined' and no fields present",
+		pod: &api.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueUnconfined,
+				},
+			},
+			Spec: api.PodSpec{
+				Containers: []api.Container{{Name: "ctr"}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueUnconfined,
+			}, pod.Annotations)
+			assert.Equal(t, api.AppArmorProfileTypeUnconfined, pod.Spec.Containers[0].SecurityContext.AppArmorProfile.Type)
+			assert.Nil(t, pod.Spec.Containers[0].SecurityContext.AppArmorProfile.LocalhostProfile)
+			assert.Nil(t, pod.Spec.SecurityContext)
+		},
+		expectWarning: true,
+	}, {
+		description: "Annotation for non-existent container",
+		pod: &api.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					api.DeprecatedAppArmorAnnotationKeyPrefix + "foo-bar": api.DeprecatedAppArmorAnnotationValueUnconfined,
+				},
+			},
+			Spec: api.PodSpec{
+				Containers: []api.Container{{Name: "ctr"}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "foo-bar": api.DeprecatedAppArmorAnnotationValueUnconfined,
+			}, pod.Annotations)
+			assert.Nil(t, pod.Spec.Containers[0].SecurityContext)
+			assert.Nil(t, pod.Spec.SecurityContext)
+		},
+	}, {
+		description: "Annotation 'runtime/default' and no fields present",
+		pod: &api.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueRuntimeDefault,
+				},
+			},
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{
+					AppArmorProfile: &api.AppArmorProfile{
+						Type: api.AppArmorProfileTypeUnconfined,
+					},
+				},
+				Containers: []api.Container{{
+					Name:            "ctr",
+					SecurityContext: &api.SecurityContext{},
+				}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueRuntimeDefault,
+			}, pod.Annotations)
+			assert.Equal(t, api.AppArmorProfileTypeRuntimeDefault, pod.Spec.Containers[0].SecurityContext.AppArmorProfile.Type)
+			assert.Nil(t, pod.Spec.Containers[0].SecurityContext.AppArmorProfile.LocalhostProfile)
+			assert.Equal(t, api.AppArmorProfileTypeUnconfined, pod.Spec.SecurityContext.AppArmorProfile.Type)
+		},
+		expectWarning: true,
+	}, {
+		description: "Multiple containers by annotations",
+		pod: &api.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					api.DeprecatedAppArmorAnnotationKeyPrefix + "init": api.DeprecatedAppArmorAnnotationValueUnconfined,
+					api.DeprecatedAppArmorAnnotationKeyPrefix + "a":    api.DeprecatedAppArmorAnnotationValueLocalhostPrefix + testProfile,
+					api.DeprecatedAppArmorAnnotationKeyPrefix + "c":    api.DeprecatedAppArmorAnnotationValueRuntimeDefault,
+				},
+			},
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{
+					AppArmorProfile: &api.AppArmorProfile{
+						Type: api.AppArmorProfileTypeRuntimeDefault,
+					},
+				},
+				InitContainers: []api.Container{{Name: "init"}},
+				Containers: []api.Container{
+					{Name: "a"},
+					{Name: "b"},
+					{Name: "c"},
+				},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "init": api.DeprecatedAppArmorAnnotationValueUnconfined,
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "a":    api.DeprecatedAppArmorAnnotationValueLocalhostPrefix + testProfile,
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "b":    api.DeprecatedAppArmorAnnotationValueRuntimeDefault,
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "c":    api.DeprecatedAppArmorAnnotationValueRuntimeDefault,
+			}, pod.Annotations)
+			assert.Equal(t, api.AppArmorProfileTypeUnconfined, pod.Spec.InitContainers[0].SecurityContext.AppArmorProfile.Type)
+			assert.Equal(t, api.AppArmorProfileTypeLocalhost, pod.Spec.Containers[0].SecurityContext.AppArmorProfile.Type)
+			assert.Equal(t, testProfile, *pod.Spec.Containers[0].SecurityContext.AppArmorProfile.LocalhostProfile)
+			assert.Nil(t, pod.Spec.Containers[1].SecurityContext)
+			assert.Nil(t, pod.Spec.Containers[2].SecurityContext)
+			assert.Equal(t, api.AppArmorProfileTypeRuntimeDefault, pod.Spec.SecurityContext.AppArmorProfile.Type)
+		},
+		expectWarning: true,
+	}, {
+		description: "Conflicting field and annotations",
+		pod: &api.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueLocalhostPrefix + testProfile,
+				},
+			},
+			Spec: api.PodSpec{
+				Containers: []api.Container{{
+					Name: "ctr",
+					SecurityContext: &api.SecurityContext{
+						AppArmorProfile: &api.AppArmorProfile{
+							Type: api.AppArmorProfileTypeRuntimeDefault,
+						},
+					},
+				}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueLocalhostPrefix + testProfile,
+			}, pod.Annotations)
+			assert.Equal(t, api.AppArmorProfileTypeRuntimeDefault, pod.Spec.Containers[0].SecurityContext.AppArmorProfile.Type)
+			assert.Nil(t, pod.Spec.Containers[0].SecurityContext.AppArmorProfile.LocalhostProfile)
+			assert.Nil(t, pod.Spec.SecurityContext)
+		},
+	}, {
+		description: "Pod field and matching annotations",
+		pod: &api.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueRuntimeDefault,
+				},
+			},
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{
+					AppArmorProfile: &api.AppArmorProfile{
+						Type: api.AppArmorProfileTypeRuntimeDefault,
+					},
+				},
+				Containers: []api.Container{{
+					Name: "ctr",
+				}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueRuntimeDefault,
+			}, pod.Annotations)
+			assert.Equal(t, api.AppArmorProfileTypeRuntimeDefault, pod.Spec.SecurityContext.AppArmorProfile.Type)
+			// Annotation shouldn't be synced to container security context
+			assert.Nil(t, pod.Spec.Containers[0].SecurityContext)
+		},
+	}, {
+		description: "Annotation overrides pod field",
+		pod: &api.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueUnconfined,
+				},
+			},
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{
+					AppArmorProfile: &api.AppArmorProfile{
+						Type: api.AppArmorProfileTypeRuntimeDefault,
+					},
+				},
+				Containers: []api.Container{{
+					Name: "ctr",
+				}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueUnconfined,
+			}, pod.Annotations)
+			assert.Equal(t, api.AppArmorProfileTypeRuntimeDefault, pod.Spec.SecurityContext.AppArmorProfile.Type)
+			assert.Equal(t, api.AppArmorProfileTypeUnconfined, pod.Spec.Containers[0].SecurityContext.AppArmorProfile.Type)
+		},
+		expectWarning: true,
+	}, {
+		description: "Mixed annotations and fields",
+		pod: &api.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					api.DeprecatedAppArmorAnnotationKeyPrefix + "unconf-annot": api.DeprecatedAppArmorAnnotationValueUnconfined,
+				},
+			},
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{
+					AppArmorProfile: &api.AppArmorProfile{
+						Type: api.AppArmorProfileTypeRuntimeDefault,
+					},
+				},
+				Containers: []api.Container{{
+					Name: "unconf-annot",
+				}, {
+					Name: "unconf-field",
+					SecurityContext: &api.SecurityContext{
+						AppArmorProfile: &api.AppArmorProfile{
+							Type: api.AppArmorProfileTypeUnconfined,
+						},
+					},
+				}, {
+					Name: "default-pod",
+				}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "unconf-annot": api.DeprecatedAppArmorAnnotationValueUnconfined,
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "unconf-field": api.DeprecatedAppArmorAnnotationValueUnconfined,
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "default-pod":  api.DeprecatedAppArmorAnnotationValueRuntimeDefault,
+			}, pod.Annotations)
+			assert.Equal(t, api.AppArmorProfileTypeRuntimeDefault, pod.Spec.SecurityContext.AppArmorProfile.Type)
+			assert.Equal(t, api.AppArmorProfileTypeUnconfined, pod.Spec.Containers[0].SecurityContext.AppArmorProfile.Type)
+			assert.Equal(t, api.AppArmorProfileTypeUnconfined, pod.Spec.Containers[1].SecurityContext.AppArmorProfile.Type)
+			assert.Nil(t, pod.Spec.Containers[2].SecurityContext)
+		},
+		expectWarning: true,
+	}, {
+		description: "Invalid annotation value",
+		pod: &api.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": "localhost/",
+				},
+			},
+			Spec: api.PodSpec{
+				Containers: []api.Container{{Name: "ctr"}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": "localhost/",
+			}, pod.Annotations)
+			assert.Nil(t, pod.Spec.Containers[0].SecurityContext)
+			assert.Nil(t, pod.Spec.SecurityContext)
+		},
+		expectWarning: true,
+	}, {
+		description: "Invalid localhost annotation",
+		pod: &api.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueLocalhostPrefix + strings.Repeat("a", 4096),
+				},
+			},
+			Spec: api.PodSpec{
+				Containers: []api.Container{{Name: "ctr"}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Contains(t, pod.Annotations, api.DeprecatedAppArmorAnnotationKeyPrefix+"ctr")
+			assert.Nil(t, pod.Spec.Containers[0].SecurityContext)
+			assert.Nil(t, pod.Spec.SecurityContext)
+		},
+		expectWarning: true,
+	}, {
+		description: "Invalid field type",
+		pod: &api.Pod{
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{
+					AppArmorProfile: &api.AppArmorProfile{
+						Type: "invalid-type",
+					},
+				},
+				Containers: []api.Container{{Name: "ctr"}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Empty(t, pod.Annotations)
+			assert.Nil(t, pod.Spec.Containers[0].SecurityContext)
+		},
+	}, {
+		description: "Ignore annotations on windows",
+		pod: &api.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueRuntimeDefault,
+				},
+			},
+			Spec: api.PodSpec{
+				OS:         &api.PodOS{Name: api.Windows},
+				Containers: []api.Container{{Name: "ctr"}},
+			},
+		},
+		validation: func(t *testing.T, pod *api.Pod) {
+			assert.Equal(t, map[string]string{
+				api.DeprecatedAppArmorAnnotationKeyPrefix + "ctr": api.DeprecatedAppArmorAnnotationValueRuntimeDefault,
+			}, pod.Annotations)
+			assert.Nil(t, pod.Spec.Containers[0].SecurityContext)
+		},
+	}}
+
+	for _, test := range tests {
+		t.Run(test.description, func(t *testing.T) {
+			warnings := &warningRecorder{}
+			ctx := warning.WithWarningRecorder(context.Background(), warnings)
+			applyAppArmorVersionSkew(ctx, test.pod)
+			test.validation(t, test.pod)
+
+			if test.expectWarning {
+				if assert.NotEmpty(t, warnings.warnings, "expect warnings") {
+					assert.Contains(t, warnings.warnings[0], `deprecated since v1.30; use the "appArmorProfile" field instead`)
+				}
+			} else {
+				assert.Empty(t, warnings.warnings, "shouldn't emit a warning")
+			}
+		})
+	}
+}
+
+type warningRecorder struct {
+	warnings []string
+}
+
+var _ warning.Recorder = &warningRecorder{}
+
+func (w *warningRecorder) AddWarning(_, text string) {
+	w.warnings = append(w.warnings, text)
 }

@@ -28,10 +28,12 @@ import (
 	"sort"
 	"time"
 
+	"github.com/blang/semver/v4"
 	"github.com/spf13/cobra"
-
+	coordinationv1 "k8s.io/api/coordination/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/uuid"
@@ -39,6 +41,7 @@ import (
 	"k8s.io/apiserver/pkg/server/healthz"
 	"k8s.io/apiserver/pkg/server/mux"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	utilversion "k8s.io/apiserver/pkg/util/version"
 	cacheddiscovery "k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/informers"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -74,7 +77,9 @@ import (
 	"k8s.io/kubernetes/cmd/kube-controller-manager/app/options"
 	"k8s.io/kubernetes/cmd/kube-controller-manager/names"
 	kubectrlmgrconfig "k8s.io/kubernetes/pkg/controller/apis/config"
+	garbagecollector "k8s.io/kubernetes/pkg/controller/garbagecollector"
 	serviceaccountcontroller "k8s.io/kubernetes/pkg/controller/serviceaccount"
+	kubefeatures "k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/serviceaccount"
 )
 
@@ -102,6 +107,9 @@ const (
 
 // NewControllerManagerCommand creates a *cobra.Command object with default parameters
 func NewControllerManagerCommand() *cobra.Command {
+	_, _ = utilversion.DefaultComponentGlobalsRegistry.ComponentGlobalsOrRegister(
+		utilversion.DefaultKubeComponent, utilversion.DefaultBuildEffectiveVersion(), utilfeature.DefaultMutableFeatureGate)
+
 	s, err := options.NewKubeControllerManagerOptions()
 	if err != nil {
 		klog.Background().Error(err, "Unable to initialize command options")
@@ -123,7 +131,8 @@ controller, and serviceaccounts controller.`,
 			// kube-controller-manager generically watches APIs (including deprecated ones),
 			// and CI ensures it works properly against matching kube-apiserver versions.
 			restclient.SetDefaultWarningHandler(restclient.NoWarnings{})
-			return nil
+			// makes sure feature gates are set before RunE.
+			return s.ComponentGlobalsRegistry.Set()
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			verflag.PrintAndExitIfRequested()
@@ -139,8 +148,10 @@ controller, and serviceaccounts controller.`,
 			if err != nil {
 				return err
 			}
+
 			// add feature enablement metrics
-			utilfeature.DefaultMutableFeatureGate.AddMetrics()
+			fg := s.ComponentGlobalsRegistry.FeatureGateFor(utilversion.DefaultKubeComponent)
+			fg.(featuregate.MutableFeatureGate).AddMetrics()
 			return Run(context.Background(), c.Complete())
 		},
 		Args: func(cmd *cobra.Command, args []string) error {
@@ -157,7 +168,6 @@ controller, and serviceaccounts controller.`,
 	namedFlagSets := s.Flags(KnownControllers(), ControllersDisabledByDefault(), ControllerAliases())
 	verflag.AddFlags(namedFlagSets.FlagSet("global"))
 	globalflag.AddGlobalFlags(namedFlagSets.FlagSet("global"), cmd.Name(), logs.SkipLoggingConfigurationFlags())
-	registerLegacyGlobalFlags(namedFlagSets)
 	for _, f := range namedFlagSets.FlagSets {
 		fs.AddFlagSet(f)
 	}
@@ -227,7 +237,7 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 	saTokenControllerDescriptor := newServiceAccountTokenControllerDescriptor(rootClientBuilder)
 
 	run := func(ctx context.Context, controllerDescriptors map[string]*ControllerDescriptor) {
-		controllerContext, err := CreateControllerContext(logger, c, rootClientBuilder, clientBuilder, ctx.Done())
+		controllerContext, err := CreateControllerContext(ctx, c, rootClientBuilder, clientBuilder)
 		if err != nil {
 			logger.Error(err, "Error building controller context")
 			klog.FlushAndExit(klog.ExitFlushTimeout, 1)
@@ -280,6 +290,34 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 			defer close(leaderMigrator.MigrationReady)
 			return startSATokenControllerInit(ctx, controllerContext, controllerName)
 		}
+	}
+
+	if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.CoordinatedLeaderElection) {
+		binaryVersion, err := semver.ParseTolerant(utilversion.DefaultComponentGlobalsRegistry.EffectiveVersionFor(utilversion.DefaultKubeComponent).BinaryVersion().String())
+		if err != nil {
+			return err
+		}
+		emulationVersion, err := semver.ParseTolerant(utilversion.DefaultComponentGlobalsRegistry.EffectiveVersionFor(utilversion.DefaultKubeComponent).EmulationVersion().String())
+		if err != nil {
+			return err
+		}
+
+		// Start lease candidate controller for coordinated leader election
+		leaseCandidate, waitForSync, err := leaderelection.NewCandidate(
+			c.Client,
+			"kube-system",
+			id,
+			"kube-controller-manager",
+			binaryVersion.FinalizeVersion(),
+			emulationVersion.FinalizeVersion(),
+			[]coordinationv1.CoordinatedLeaseStrategy{coordinationv1.OldestEmulationVersion},
+		)
+		if err != nil {
+			return err
+		}
+		healthzHandler.AddHealthChecker(healthz.NewInformerSyncHealthz(waitForSync))
+
+		go leaseCandidate.Run(ctx)
 	}
 
 	// Start the main lock
@@ -378,6 +416,9 @@ type ControllerContext struct {
 
 	// ControllerManagerMetrics provides a proxy to set controller manager specific metrics.
 	ControllerManagerMetrics *controllersmetrics.ControllerManagerMetrics
+
+	// GraphBuilder gives an access to dependencyGraphBuilder which keeps tracks of resources in the cluster
+	GraphBuilder *garbagecollector.GraphBuilder
 }
 
 // IsControllerEnabled checks if the context's controllers enabled or not
@@ -558,6 +599,7 @@ func NewControllerDescriptors() map[string]*ControllerDescriptor {
 	register(newValidatingAdmissionPolicyStatusControllerDescriptor())
 	register(newTaintEvictionControllerDescriptor())
 	register(newServiceCIDRsControllerDescriptor())
+	register(newStorageVersionMigratorControllerDescriptor())
 
 	for _, alias := range aliases.UnsortedList() {
 		if _, ok := controllers[alias]; ok {
@@ -571,11 +613,13 @@ func NewControllerDescriptors() map[string]*ControllerDescriptor {
 // CreateControllerContext creates a context struct containing references to resources needed by the
 // controllers such as the cloud provider and clientBuilder. rootClientBuilder is only used for
 // the shared-informers client and token controller.
-func CreateControllerContext(logger klog.Logger, s *config.CompletedConfig, rootClientBuilder, clientBuilder clientbuilder.ControllerClientBuilder, stop <-chan struct{}) (ControllerContext, error) {
+func CreateControllerContext(ctx context.Context, s *config.CompletedConfig, rootClientBuilder, clientBuilder clientbuilder.ControllerClientBuilder) (ControllerContext, error) {
 	// Informer transform to trim ManagedFields for memory efficiency.
 	trim := func(obj interface{}) (interface{}, error) {
 		if accessor, err := meta.Accessor(obj); err == nil {
-			accessor.SetManagedFields(nil)
+			if accessor.GetManagedFields() != nil {
+				accessor.SetManagedFields(nil)
+			}
 		}
 		return obj, nil
 	}
@@ -598,15 +642,15 @@ func CreateControllerContext(logger klog.Logger, s *config.CompletedConfig, root
 	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedClient)
 	go wait.Until(func() {
 		restMapper.Reset()
-	}, 30*time.Second, stop)
+	}, 30*time.Second, ctx.Done())
 
-	cloud, loopMode, err := createCloudProvider(logger, s.ComponentConfig.KubeCloudShared.CloudProvider.Name, s.ComponentConfig.KubeCloudShared.ExternalCloudVolumePlugin,
+	cloud, loopMode, err := createCloudProvider(klog.FromContext(ctx), s.ComponentConfig.KubeCloudShared.CloudProvider.Name, s.ComponentConfig.KubeCloudShared.ExternalCloudVolumePlugin,
 		s.ComponentConfig.KubeCloudShared.CloudProvider.CloudConfigFile, s.ComponentConfig.KubeCloudShared.AllowUntaggedCloud, sharedInformers)
 	if err != nil {
 		return ControllerContext{}, err
 	}
 
-	ctx := ControllerContext{
+	controllerContext := ControllerContext{
 		ClientBuilder:                   clientBuilder,
 		InformerFactory:                 sharedInformers,
 		ObjectOrMetadataInformerFactory: informerfactory.NewInformerFactory(sharedInformers, metadataInformers),
@@ -618,8 +662,26 @@ func CreateControllerContext(logger klog.Logger, s *config.CompletedConfig, root
 		ResyncPeriod:                    ResyncPeriod(s),
 		ControllerManagerMetrics:        controllersmetrics.NewControllerManagerMetrics("kube-controller-manager"),
 	}
+
+	if controllerContext.ComponentConfig.GarbageCollectorController.EnableGarbageCollector &&
+		controllerContext.IsControllerEnabled(NewControllerDescriptors()[names.GarbageCollectorController]) {
+		ignoredResources := make(map[schema.GroupResource]struct{})
+		for _, r := range controllerContext.ComponentConfig.GarbageCollectorController.GCIgnoredResources {
+			ignoredResources[schema.GroupResource{Group: r.Group, Resource: r.Resource}] = struct{}{}
+		}
+
+		controllerContext.GraphBuilder = garbagecollector.NewDependencyGraphBuilder(
+			ctx,
+			metadataClient,
+			controllerContext.RESTMapper,
+			ignoredResources,
+			controllerContext.ObjectOrMetadataInformerFactory,
+			controllerContext.InformersStarted,
+		)
+	}
+
 	controllersmetrics.Register()
-	return ctx, nil
+	return controllerContext, nil
 }
 
 // StartControllers starts a set of controllers with a specified ControllerContext
@@ -854,6 +916,7 @@ func leaderElectAndRun(ctx context.Context, c *config.CompletedConfig, lockIdent
 		Callbacks:     callbacks,
 		WatchDog:      electionChecker,
 		Name:          leaseName,
+		Coordinated:   utilfeature.DefaultFeatureGate.Enabled(kubefeatures.CoordinatedLeaderElection),
 	})
 
 	panic("unreachable")

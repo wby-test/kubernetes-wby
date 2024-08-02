@@ -433,6 +433,10 @@
               "volumeAttributesClassName": "volumeAttributesClassNameValue"
             }
           }
+        },
+        "image": {
+          "reference": "referenceValue",
+          "pullPolicy": "pullPolicyValue"
         }
       }
     ],
@@ -505,7 +509,8 @@
           },
           "claims": [
             {
-              "name": "nameValue"
+              "name": "nameValue",
+              "request": "requestValue"
             }
           ]
         },
@@ -520,6 +525,7 @@
           {
             "name": "nameValue",
             "readOnly": true,
+            "recursiveReadOnly": "recursiveReadOnlyValue",
             "mountPath": "mountPathValue",
             "subPath": "subPathValue",
             "mountPropagation": "mountPropagationValue",
@@ -717,6 +723,10 @@
           "allowPrivilegeEscalation": true,
           "procMount": "procMountValue",
           "seccompProfile": {
+            "type": "typeValue",
+            "localhostProfile": "localhostProfileValue"
+          },
+          "appArmorProfile": {
             "type": "typeValue",
             "localhostProfile": "localhostProfileValue"
           }
@@ -795,7 +805,8 @@
           },
           "claims": [
             {
-              "name": "nameValue"
+              "name": "nameValue",
+              "request": "requestValue"
             }
           ]
         },
@@ -810,6 +821,7 @@
           {
             "name": "nameValue",
             "readOnly": true,
+            "recursiveReadOnly": "recursiveReadOnlyValue",
             "mountPath": "mountPathValue",
             "subPath": "subPathValue",
             "mountPropagation": "mountPropagationValue",
@@ -1007,6 +1019,10 @@
           "allowPrivilegeEscalation": true,
           "procMount": "procMountValue",
           "seccompProfile": {
+            "type": "typeValue",
+            "localhostProfile": "localhostProfileValue"
+          },
+          "appArmorProfile": {
             "type": "typeValue",
             "localhostProfile": "localhostProfileValue"
           }
@@ -1085,7 +1101,8 @@
           },
           "claims": [
             {
-              "name": "nameValue"
+              "name": "nameValue",
+              "request": "requestValue"
             }
           ]
         },
@@ -1100,6 +1117,7 @@
           {
             "name": "nameValue",
             "readOnly": true,
+            "recursiveReadOnly": "recursiveReadOnlyValue",
             "mountPath": "mountPathValue",
             "subPath": "subPathValue",
             "mountPropagation": "mountPropagationValue",
@@ -1299,6 +1317,10 @@
           "seccompProfile": {
             "type": "typeValue",
             "localhostProfile": "localhostProfileValue"
+          },
+          "appArmorProfile": {
+            "type": "typeValue",
+            "localhostProfile": "localhostProfileValue"
           }
         },
         "stdin": true,
@@ -1341,6 +1363,7 @@
       "supplementalGroups": [
         4
       ],
+      "supplementalGroupsPolicy": "supplementalGroupsPolicyValue",
       "fsGroup": 5,
       "sysctls": [
         {
@@ -1350,6 +1373,10 @@
       ],
       "fsGroupChangePolicy": "fsGroupChangePolicyValue",
       "seccompProfile": {
+        "type": "typeValue",
+        "localhostProfile": "localhostProfileValue"
+      },
+      "appArmorProfile": {
         "type": "typeValue",
         "localhostProfile": "localhostProfileValue"
       }
@@ -1677,10 +1704,8 @@
     "resourceClaims": [
       {
         "name": "nameValue",
-        "source": {
-          "resourceClaimName": "resourceClaimNameValue",
-          "resourceClaimTemplateName": "resourceClaimTemplateNameValue"
-        }
+        "resourceClaimName": "resourceClaimNameValue",
+        "resourceClaimTemplateName": "resourceClaimTemplateNameValue"
       }
     ]
   },
@@ -1769,10 +1794,39 @@
           },
           "claims": [
             {
-              "name": "nameValue"
+              "name": "nameValue",
+              "request": "requestValue"
             }
           ]
-        }
+        },
+        "volumeMounts": [
+          {
+            "name": "nameValue",
+            "mountPath": "mountPathValue",
+            "readOnly": true,
+            "recursiveReadOnly": "recursiveReadOnlyValue"
+          }
+        ],
+        "user": {
+          "linux": {
+            "uid": 1,
+            "gid": 2,
+            "supplementalGroups": [
+              3
+            ]
+          }
+        },
+        "allocatedResourcesStatus": [
+          {
+            "name": "nameValue",
+            "resources": [
+              {
+                "resourceID": "resourceIDValue",
+                "health": "healthValue"
+              }
+            ]
+          }
+        ]
       }
     ],
     "containerStatuses": [
@@ -1832,10 +1886,39 @@
           },
           "claims": [
             {
-              "name": "nameValue"
+              "name": "nameValue",
+              "request": "requestValue"
             }
           ]
-        }
+        },
+        "volumeMounts": [
+          {
+            "name": "nameValue",
+            "mountPath": "mountPathValue",
+            "readOnly": true,
+            "recursiveReadOnly": "recursiveReadOnlyValue"
+          }
+        ],
+        "user": {
+          "linux": {
+            "uid": 1,
+            "gid": 2,
+            "supplementalGroups": [
+              3
+            ]
+          }
+        },
+        "allocatedResourcesStatus": [
+          {
+            "name": "nameValue",
+            "resources": [
+              {
+                "resourceID": "resourceIDValue",
+                "health": "healthValue"
+              }
+            ]
+          }
+        ]
       }
     ],
     "qosClass": "qosClassValue",
@@ -1896,10 +1979,39 @@
           },
           "claims": [
             {
-              "name": "nameValue"
+              "name": "nameValue",
+              "request": "requestValue"
             }
           ]
-        }
+        },
+        "volumeMounts": [
+          {
+            "name": "nameValue",
+            "mountPath": "mountPathValue",
+            "readOnly": true,
+            "recursiveReadOnly": "recursiveReadOnlyValue"
+          }
+        ],
+        "user": {
+          "linux": {
+            "uid": 1,
+            "gid": 2,
+            "supplementalGroups": [
+              3
+            ]
+          }
+        },
+        "allocatedResourcesStatus": [
+          {
+            "name": "nameValue",
+            "resources": [
+              {
+                "resourceID": "resourceIDValue",
+                "health": "healthValue"
+              }
+            ]
+          }
+        ]
       }
     ],
     "resize": "resizeValue",

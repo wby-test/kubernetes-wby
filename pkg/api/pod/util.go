@@ -20,9 +20,10 @@ import (
 	"strings"
 
 	"github.com/google/go-cmp/cmp"
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	metavalidation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/core/helper"
@@ -382,10 +383,14 @@ func GetValidationOptionsFromPodSpecAndMeta(podSpec, oldPodSpec *api.PodSpec, po
 		AllowIndivisibleHugePagesValues:                   false,
 		AllowInvalidLabelValueInSelector:                  false,
 		AllowInvalidTopologySpreadConstraintLabelSelector: false,
-		AllowMutableNodeSelectorAndNodeAffinity:           utilfeature.DefaultFeatureGate.Enabled(features.PodSchedulingReadiness),
 		AllowNamespacedSysctlsForHostNetAndHostIPC:        false,
 		AllowNonLocalProjectedTokenPath:                   false,
+		AllowImageVolumeSource:                            utilfeature.DefaultFeatureGate.Enabled(features.ImageVolume),
 	}
+
+	// If old spec uses relaxed validation or enabled the RelaxedEnvironmentVariableValidation feature gate,
+	// we must allow it
+	opts.AllowRelaxedEnvironmentVariableValidation = useRelaxedEnvironmentVariableValidation(podSpec, oldPodSpec)
 
 	if oldPodSpec != nil {
 		// if old spec has status.hostIPs downwardAPI set, we must allow it
@@ -418,6 +423,88 @@ func GetValidationOptionsFromPodSpecAndMeta(podSpec, oldPodSpec *api.PodSpec, po
 	}
 
 	return opts
+}
+
+func useRelaxedEnvironmentVariableValidation(podSpec, oldPodSpec *api.PodSpec) bool {
+	if utilfeature.DefaultFeatureGate.Enabled(features.RelaxedEnvironmentVariableValidation) {
+		return true
+	}
+
+	var oldPodEnvVarNames, podEnvVarNames sets.Set[string]
+	if oldPodSpec != nil {
+		oldPodEnvVarNames = gatherPodEnvVarNames(oldPodSpec)
+	}
+
+	if podSpec != nil {
+		podEnvVarNames = gatherPodEnvVarNames(podSpec)
+	}
+
+	for env := range podEnvVarNames {
+		if relaxedEnvVarUsed(env, oldPodEnvVarNames) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func gatherPodEnvVarNames(podSpec *api.PodSpec) sets.Set[string] {
+	podEnvVarNames := sets.Set[string]{}
+
+	for _, c := range podSpec.Containers {
+		for _, env := range c.Env {
+			podEnvVarNames.Insert(env.Name)
+		}
+
+		for _, env := range c.EnvFrom {
+			podEnvVarNames.Insert(env.Prefix)
+		}
+	}
+
+	for _, c := range podSpec.InitContainers {
+		for _, env := range c.Env {
+			podEnvVarNames.Insert(env.Name)
+		}
+
+		for _, env := range c.EnvFrom {
+			podEnvVarNames.Insert(env.Prefix)
+		}
+	}
+
+	for _, c := range podSpec.EphemeralContainers {
+		for _, env := range c.Env {
+			podEnvVarNames.Insert(env.Name)
+		}
+
+		for _, env := range c.EnvFrom {
+			podEnvVarNames.Insert(env.Prefix)
+		}
+	}
+
+	return podEnvVarNames
+}
+
+func relaxedEnvVarUsed(name string, oldPodEnvVarNames sets.Set[string]) bool {
+	// A length of 0 means this is not an update request,
+	// or the old pod does not exist in the env.
+	// We will let the feature gate decide whether to use relaxed rules.
+	if oldPodEnvVarNames.Len() == 0 {
+		return false
+	}
+
+	if len(validation.IsEnvVarName(name)) == 0 || len(validation.IsRelaxedEnvVarName(name)) != 0 {
+		// It's either a valid name by strict rules or an invalid name under relaxed rules.
+		// Either way, we'll use strict rules to validate.
+		return false
+	}
+
+	// The name in question failed strict rules but passed relaxed rules.
+	if oldPodEnvVarNames.Has(name) {
+		// This relaxed-rules name was already in use.
+		return true
+	}
+
+	return false
 }
 
 func hasUsedDownwardAPIFieldPathWithPodSpec(podSpec *api.PodSpec, fieldPath string) bool {
@@ -541,14 +628,6 @@ func dropDisabledFields(
 		podSpec = &api.PodSpec{}
 	}
 
-	if !utilfeature.DefaultFeatureGate.Enabled(features.AppArmor) && !appArmorInUse(oldPodAnnotations) {
-		for k := range podAnnotations {
-			if strings.HasPrefix(k, v1.AppArmorBetaContainerAnnotationKeyPrefix) {
-				delete(podAnnotations, k)
-			}
-		}
-	}
-
 	// If the feature is disabled and not in use, drop the hostUsers field.
 	if !utilfeature.DefaultFeatureGate.Enabled(features.UserNamespacesSupport) && !hostUsersInUse(oldPodSpec) {
 		// Drop the field in podSpec only if SecurityContext is not nil.
@@ -558,14 +637,17 @@ func dropDisabledFields(
 		}
 	}
 
-	// If the feature is disabled and not in use, drop the schedulingGates field.
-	if !utilfeature.DefaultFeatureGate.Enabled(features.PodSchedulingReadiness) && !schedulingGatesInUse(oldPodSpec) {
-		podSpec.SchedulingGates = nil
+	// If the feature is disabled and not in use, drop the SupplementalGroupsPolicy field.
+	if !utilfeature.DefaultFeatureGate.Enabled(features.SupplementalGroupsPolicy) && !supplementalGroupsPolicyInUse(oldPodSpec) {
+		// Drop the field in podSpec only if SecurityContext is not nil.
+		// If it is nil, there is no need to set supplementalGroupsPolicy=nil (it will be nil too).
+		if podSpec.SecurityContext != nil {
+			podSpec.SecurityContext.SupplementalGroupsPolicy = nil
+		}
 	}
 
 	dropDisabledProcMountField(podSpec, oldPodSpec)
 
-	dropDisabledTopologySpreadConstraintsFields(podSpec, oldPodSpec)
 	dropDisabledNodeInclusionPolicyFields(podSpec, oldPodSpec)
 	dropDisabledMatchLabelKeysFieldInTopologySpread(podSpec, oldPodSpec)
 	dropDisabledMatchLabelKeysFieldInPodAffinity(podSpec, oldPodSpec)
@@ -594,7 +676,26 @@ func dropDisabledFields(
 		// For other types of containers, validateContainers will handle them.
 	}
 
+	if !utilfeature.DefaultFeatureGate.Enabled(features.RecursiveReadOnlyMounts) && !rroInUse(oldPodSpec) {
+		for i := range podSpec.Containers {
+			for j := range podSpec.Containers[i].VolumeMounts {
+				podSpec.Containers[i].VolumeMounts[j].RecursiveReadOnly = nil
+			}
+		}
+		for i := range podSpec.InitContainers {
+			for j := range podSpec.InitContainers[i].VolumeMounts {
+				podSpec.InitContainers[i].VolumeMounts[j].RecursiveReadOnly = nil
+			}
+		}
+		for i := range podSpec.EphemeralContainers {
+			for j := range podSpec.EphemeralContainers[i].VolumeMounts {
+				podSpec.EphemeralContainers[i].VolumeMounts[j].RecursiveReadOnly = nil
+			}
+		}
+	}
+
 	dropPodLifecycleSleepAction(podSpec, oldPodSpec)
+	dropImageVolumes(podSpec, oldPodSpec)
 }
 
 func dropPodLifecycleSleepAction(podSpec, oldPodSpec *api.PodSpec) {
@@ -699,6 +800,41 @@ func dropDisabledPodStatusFields(podStatus, oldPodStatus *api.PodStatus, podSpec
 	if !utilfeature.DefaultFeatureGate.Enabled(features.PodHostIPs) && !hostIPsInUse(oldPodStatus) {
 		podStatus.HostIPs = nil
 	}
+
+	if !utilfeature.DefaultFeatureGate.Enabled(features.RecursiveReadOnlyMounts) && !rroInUse(oldPodSpec) {
+		for i := range podStatus.ContainerStatuses {
+			podStatus.ContainerStatuses[i].VolumeMounts = nil
+		}
+		for i := range podStatus.InitContainerStatuses {
+			podStatus.InitContainerStatuses[i].VolumeMounts = nil
+		}
+		for i := range podStatus.EphemeralContainerStatuses {
+			podStatus.EphemeralContainerStatuses[i].VolumeMounts = nil
+		}
+	}
+
+	if !utilfeature.DefaultFeatureGate.Enabled(features.ResourceHealthStatus) {
+		setAllocatedResourcesStatusToNil := func(csl []api.ContainerStatus) {
+			for i := range csl {
+				csl[i].AllocatedResourcesStatus = nil
+			}
+		}
+		setAllocatedResourcesStatusToNil(podStatus.ContainerStatuses)
+		setAllocatedResourcesStatusToNil(podStatus.InitContainerStatuses)
+		setAllocatedResourcesStatusToNil(podStatus.EphemeralContainerStatuses)
+	}
+
+	// drop ContainerStatus.User field to empty (disable SupplementalGroupsPolicy)
+	if !utilfeature.DefaultFeatureGate.Enabled(features.SupplementalGroupsPolicy) && !supplementalGroupsPolicyInUse(oldPodSpec) {
+		dropUserField := func(csl []api.ContainerStatus) {
+			for i := range csl {
+				csl[i].User = nil
+			}
+		}
+		dropUserField(podStatus.InitContainerStatuses)
+		dropUserField(podStatus.ContainerStatuses)
+		dropUserField(podStatus.EphemeralContainerStatuses)
+	}
 }
 
 func hostIPsInUse(podStatus *api.PodStatus) bool {
@@ -741,33 +877,6 @@ func dropEphemeralResourceClaimRequests(containers []api.EphemeralContainer) {
 	for i := range containers {
 		containers[i].Resources.Claims = nil
 	}
-}
-
-// dropDisabledTopologySpreadConstraintsFields removes disabled fields from PodSpec related
-// to TopologySpreadConstraints only if it is not already used by the old spec.
-func dropDisabledTopologySpreadConstraintsFields(podSpec, oldPodSpec *api.PodSpec) {
-	if !utilfeature.DefaultFeatureGate.Enabled(features.MinDomainsInPodTopologySpread) &&
-		!minDomainsInUse(oldPodSpec) &&
-		podSpec != nil {
-		for i := range podSpec.TopologySpreadConstraints {
-			podSpec.TopologySpreadConstraints[i].MinDomains = nil
-		}
-	}
-}
-
-// minDomainsInUse returns true if the pod spec is non-nil
-// and has non-nil MinDomains field in TopologySpreadConstraints.
-func minDomainsInUse(podSpec *api.PodSpec) bool {
-	if podSpec == nil {
-		return false
-	}
-
-	for _, c := range podSpec.TopologySpreadConstraints {
-		if c.MinDomains != nil {
-			return true
-		}
-	}
-	return false
 }
 
 // dropDisabledProcMountField removes disabled fields from PodSpec related
@@ -936,6 +1045,14 @@ func hostUsersInUse(podSpec *api.PodSpec) bool {
 	return false
 }
 
+func supplementalGroupsPolicyInUse(podSpec *api.PodSpec) bool {
+	if podSpec != nil && podSpec.SecurityContext != nil && podSpec.SecurityContext.SupplementalGroupsPolicy != nil {
+		return true
+	}
+
+	return false
+}
+
 // inPlacePodVerticalScalingInUse returns true if pod spec is non-nil and ResizePolicy is set
 func inPlacePodVerticalScalingInUse(podSpec *api.PodSpec) bool {
 	if podSpec == nil {
@@ -973,22 +1090,33 @@ func procMountInUse(podSpec *api.PodSpec) bool {
 	return inUse
 }
 
-// appArmorInUse returns true if the pod has apparmor related information
-func appArmorInUse(podAnnotations map[string]string) bool {
+// appArmorAnnotationsInUse returns true if the pod has apparmor annotations
+func appArmorAnnotationsInUse(podAnnotations map[string]string) bool {
 	for k := range podAnnotations {
-		if strings.HasPrefix(k, v1.AppArmorBetaContainerAnnotationKeyPrefix) {
+		if strings.HasPrefix(k, api.DeprecatedAppArmorAnnotationKeyPrefix) {
 			return true
 		}
 	}
 	return false
 }
 
-// schedulingGatesInUse returns true if the pod spec is non-nil and it has SchedulingGates field set.
-func schedulingGatesInUse(podSpec *api.PodSpec) bool {
+// appArmorFieldsInUse returns true if the pod has apparmor fields set
+func appArmorFieldsInUse(podSpec *api.PodSpec) bool {
 	if podSpec == nil {
 		return false
 	}
-	return len(podSpec.SchedulingGates) != 0
+	if podSpec.SecurityContext != nil && podSpec.SecurityContext.AppArmorProfile != nil {
+		return true
+	}
+	hasAppArmorContainer := false
+	VisitContainers(podSpec, AllContainers, func(c *api.Container, _ ContainerType) bool {
+		if c.SecurityContext != nil && c.SecurityContext.AppArmorProfile != nil {
+			hasAppArmorContainer = true
+			return false
+		}
+		return true
+	})
+	return hasAppArmorContainer
 }
 
 // restartableInitContainersInUse returns true if the pod spec is non-nil and
@@ -1025,6 +1153,23 @@ func clusterTrustBundleProjectionInUse(podSpec *api.PodSpec) bool {
 	}
 
 	return false
+}
+
+func rroInUse(podSpec *api.PodSpec) bool {
+	if podSpec == nil {
+		return false
+	}
+	var inUse bool
+	VisitContainers(podSpec, AllContainers, func(c *api.Container, _ ContainerType) bool {
+		for _, f := range c.VolumeMounts {
+			if f.RecursiveReadOnly != nil {
+				inUse = true
+				return false
+			}
+		}
+		return true
+	})
+	return inUse
 }
 
 func dropDisabledClusterTrustBundleProjection(podSpec, oldPodSpec *api.PodSpec) {
@@ -1108,4 +1253,57 @@ func MarkPodProposedForResize(oldPod, newPod *api.Pod) {
 			}
 		}
 	}
+}
+
+// KEP: https://kep.k8s.io/4639
+func dropImageVolumes(podSpec, oldPodSpec *api.PodSpec) {
+	if utilfeature.DefaultFeatureGate.Enabled(features.ImageVolume) || imageVolumesInUse(oldPodSpec) {
+		return
+	}
+
+	imageVolumeNames := sets.New[string]()
+	var newVolumes []api.Volume
+	for _, v := range podSpec.Volumes {
+		if v.Image != nil {
+			imageVolumeNames.Insert(v.Name)
+			continue
+		}
+		newVolumes = append(newVolumes, v)
+	}
+	podSpec.Volumes = newVolumes
+
+	dropVolumeMounts := func(givenMounts []api.VolumeMount) (newVolumeMounts []api.VolumeMount) {
+		for _, m := range givenMounts {
+			if !imageVolumeNames.Has(m.Name) {
+				newVolumeMounts = append(newVolumeMounts, m)
+			}
+		}
+		return newVolumeMounts
+	}
+
+	for i, c := range podSpec.Containers {
+		podSpec.Containers[i].VolumeMounts = dropVolumeMounts(c.VolumeMounts)
+	}
+
+	for i, c := range podSpec.InitContainers {
+		podSpec.InitContainers[i].VolumeMounts = dropVolumeMounts(c.VolumeMounts)
+	}
+
+	for i, c := range podSpec.EphemeralContainers {
+		podSpec.EphemeralContainers[i].VolumeMounts = dropVolumeMounts(c.VolumeMounts)
+	}
+}
+
+func imageVolumesInUse(podSpec *api.PodSpec) bool {
+	if podSpec == nil {
+		return false
+	}
+
+	for _, v := range podSpec.Volumes {
+		if v.Image != nil {
+			return true
+		}
+	}
+
+	return false
 }

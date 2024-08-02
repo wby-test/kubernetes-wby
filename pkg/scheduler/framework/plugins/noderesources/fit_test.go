@@ -46,16 +46,14 @@ var (
 	hugePageResourceA     = v1.ResourceName(v1.ResourceHugePagesPrefix + "2Mi")
 )
 
-func makeResources(milliCPU, memory, pods, extendedA, storage, hugePageA int64) v1.NodeResources {
-	return v1.NodeResources{
-		Capacity: v1.ResourceList{
-			v1.ResourceCPU:              *resource.NewMilliQuantity(milliCPU, resource.DecimalSI),
-			v1.ResourceMemory:           *resource.NewQuantity(memory, resource.BinarySI),
-			v1.ResourcePods:             *resource.NewQuantity(pods, resource.DecimalSI),
-			extendedResourceA:           *resource.NewQuantity(extendedA, resource.DecimalSI),
-			v1.ResourceEphemeralStorage: *resource.NewQuantity(storage, resource.BinarySI),
-			hugePageResourceA:           *resource.NewQuantity(hugePageA, resource.BinarySI),
-		},
+func makeResources(milliCPU, memory, pods, extendedA, storage, hugePageA int64) v1.ResourceList {
+	return v1.ResourceList{
+		v1.ResourceCPU:              *resource.NewMilliQuantity(milliCPU, resource.DecimalSI),
+		v1.ResourceMemory:           *resource.NewQuantity(memory, resource.BinarySI),
+		v1.ResourcePods:             *resource.NewQuantity(pods, resource.DecimalSI),
+		extendedResourceA:           *resource.NewQuantity(extendedA, resource.DecimalSI),
+		v1.ResourceEphemeralStorage: *resource.NewQuantity(storage, resource.BinarySI),
+		hugePageResourceA:           *resource.NewQuantity(hugePageA, resource.BinarySI),
 	}
 }
 
@@ -492,7 +490,7 @@ func TestEnoughRequests(t *testing.T) {
 
 	for _, test := range enoughPodsTests {
 		t.Run(test.name, func(t *testing.T) {
-			node := v1.Node{Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 5, 20, 5).Capacity, Allocatable: makeAllocatableResources(10, 20, 32, 5, 20, 5)}}
+			node := v1.Node{Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 5, 20, 5), Allocatable: makeAllocatableResources(10, 20, 32, 5, 20, 5)}}
 			test.nodeInfo.SetNode(&node)
 
 			if test.args.ScoringStrategy == nil {
@@ -644,7 +642,7 @@ func TestStorageRequests(t *testing.T) {
 			_, ctx := ktesting.NewTestContext(t)
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
-			node := v1.Node{Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 5, 20, 5).Capacity, Allocatable: makeAllocatableResources(10, 20, 32, 5, 20, 5)}}
+			node := v1.Node{Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 5, 20, 5), Allocatable: makeAllocatableResources(10, 20, 32, 5, 20, 5)}}
 			test.nodeInfo.SetNode(&node)
 
 			p, err := NewFit(ctx, &config.NodeResourcesFitArgs{ScoringStrategy: defaultScoringStrategy}, nil, plfeature.Features{})
@@ -1097,7 +1095,7 @@ func TestEventsToRegister(t *testing.T) {
 			"Register events with InPlacePodVerticalScaling feature enabled",
 			true,
 			[]framework.ClusterEventWithHint{
-				{Event: framework.ClusterEvent{Resource: "Pod", ActionType: framework.Update | framework.Delete}},
+				{Event: framework.ClusterEvent{Resource: "Pod", ActionType: framework.UpdatePodScaleDown | framework.Delete}},
 				{Event: framework.ClusterEvent{Resource: "Node", ActionType: framework.Add | framework.Update}},
 			},
 		},
@@ -1114,7 +1112,10 @@ func TestEventsToRegister(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fp := &Fit{enableInPlacePodVerticalScaling: test.inPlacePodVerticalScalingEnabled}
-			actualClusterEvents := fp.EventsToRegister()
+			actualClusterEvents, err := fp.EventsToRegister(context.TODO())
+			if err != nil {
+				t.Fatal(err)
+			}
 			for i := range actualClusterEvents {
 				actualClusterEvents[i].QueueingHintFn = nil
 			}
@@ -1147,9 +1148,9 @@ func Test_isSchedulableAfterPodChange(t *testing.T) {
 			expectedHint:                    framework.Queue,
 			expectedErr:                     true,
 		},
-		"queue-on-deleted": {
-			pod:                             st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Obj(),
-			oldObj:                          st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Node("fake").Obj(),
+		"queue-on-other-pod-deleted": {
+			pod:                             st.MakePod().Name("pod1").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Obj(),
+			oldObj:                          st.MakePod().Name("pod2").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Node("fake").Obj(),
 			enableInPlacePodVerticalScaling: true,
 			expectedHint:                    framework.Queue,
 		},
@@ -1160,44 +1161,51 @@ func Test_isSchedulableAfterPodChange(t *testing.T) {
 			expectedHint:                    framework.QueueSkip,
 		},
 		"skip-queue-on-disable-inplace-pod-vertical-scaling": {
-			pod:                             st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Obj(),
-			oldObj:                          st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Node("fake").Obj(),
-			newObj:                          st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Node("fake").Obj(),
+			pod:                             st.MakePod().Name("pod1").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Obj(),
+			oldObj:                          st.MakePod().Name("pod2").Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Node("fake").Obj(),
+			newObj:                          st.MakePod().Name("pod2").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Node("fake").Obj(),
 			enableInPlacePodVerticalScaling: false,
 			expectedHint:                    framework.QueueSkip,
 		},
-		"skip-queue-on-unscheduled-pod": {
-			pod:                             st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Obj(),
-			oldObj:                          st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Obj(),
-			newObj:                          st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Obj(),
+		"skip-queue-on-other-unscheduled-pod": {
+			pod:                             st.MakePod().Name("pod1").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).UID("uid0").Obj(),
+			oldObj:                          st.MakePod().Name("pod2").Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).UID("uid1").Obj(),
+			newObj:                          st.MakePod().Name("pod2").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).UID("uid1").Obj(),
 			enableInPlacePodVerticalScaling: true,
 			expectedHint:                    framework.QueueSkip,
 		},
-		"skip-queue-on-non-resource-changes": {
+		"skip-queue-on-other-pod-non-resource-changes": {
 			pod:                             &v1.Pod{},
-			oldObj:                          st.MakePod().Label("k", "v").Node("fake").Obj(),
-			newObj:                          st.MakePod().Label("foo", "bar").Node("fake").Obj(),
+			oldObj:                          st.MakePod().Name("pod2").Label("k", "v").Node("fake").Obj(),
+			newObj:                          st.MakePod().Name("pod2").Label("foo", "bar").Node("fake").Obj(),
 			enableInPlacePodVerticalScaling: true,
 			expectedHint:                    framework.QueueSkip,
 		},
-		"skip-queue-on-unrelated-resource-changes": {
-			pod:                             st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Obj(),
-			oldObj:                          st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceMemory: "2"}).Node("fake").Obj(),
-			newObj:                          st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceMemory: "1"}).Node("fake").Obj(),
+		"skip-queue-on-other-pod-unrelated-resource-changes": {
+			pod:                             st.MakePod().Name("pod1").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Obj(),
+			oldObj:                          st.MakePod().Name("pod2").Req(map[v1.ResourceName]string{v1.ResourceMemory: "2"}).Node("fake").Obj(),
+			newObj:                          st.MakePod().Name("pod2").Req(map[v1.ResourceName]string{v1.ResourceMemory: "1"}).Node("fake").Obj(),
 			enableInPlacePodVerticalScaling: true,
 			expectedHint:                    framework.QueueSkip,
 		},
-		"skip-queue-on-resource-scale-up": {
-			pod:                             st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Obj(),
-			oldObj:                          st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Node("fake").Obj(),
-			newObj:                          st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Node("fake").Obj(),
+		"skip-queue-on-other-pod-resource-scale-up": {
+			pod:                             st.MakePod().Name("pod1").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Obj(),
+			oldObj:                          st.MakePod().Name("pod2").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Node("fake").Obj(),
+			newObj:                          st.MakePod().Name("pod2").Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Node("fake").Obj(),
 			enableInPlacePodVerticalScaling: true,
 			expectedHint:                    framework.QueueSkip,
 		},
-		"queue-on-some-resource-scale-down": {
-			pod:                             st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Obj(),
-			oldObj:                          st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Node("fake").Obj(),
-			newObj:                          st.MakePod().Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Node("fake").Obj(),
+		"queue-on-other-pod-some-resource-scale-down": {
+			pod:                             st.MakePod().Name("pod1").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Obj(),
+			oldObj:                          st.MakePod().Name("pod2").Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Node("fake").Obj(),
+			newObj:                          st.MakePod().Name("pod2").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Node("fake").Obj(),
+			enableInPlacePodVerticalScaling: true,
+			expectedHint:                    framework.Queue,
+		},
+		"queue-on-target-pod-some-resource-scale-down": {
+			pod:                             st.MakePod().Name("pod1").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Obj(),
+			oldObj:                          st.MakePod().Name("pod1").Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Obj(),
+			newObj:                          st.MakePod().Name("pod1").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Obj(),
 			enableInPlacePodVerticalScaling: true,
 			expectedHint:                    framework.Queue,
 		},

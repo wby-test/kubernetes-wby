@@ -41,6 +41,7 @@ import (
 	storagelisters "k8s.io/client-go/listers/storage/v1"
 	csitranslationplugins "k8s.io/csi-translation-lib/plugins"
 	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/kubernetes/pkg/kubelet/util"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/csi/nodeinfomanager"
 	volumetypes "k8s.io/kubernetes/pkg/volume/util/types"
@@ -108,7 +109,7 @@ func (h *RegistrationHandler) ValidatePlugin(pluginName string, endpoint string,
 }
 
 // RegisterPlugin is called when a plugin can be registered
-func (h *RegistrationHandler) RegisterPlugin(pluginName string, endpoint string, versions []string) error {
+func (h *RegistrationHandler) RegisterPlugin(pluginName string, endpoint string, versions []string, pluginClientTimeout *time.Duration) error {
 	klog.Infof(log("Register new plugin with name: %s at endpoint: %s", pluginName, endpoint))
 
 	highestSupportedVersion, err := h.validateVersions("RegisterPlugin", pluginName, endpoint, versions)
@@ -129,7 +130,14 @@ func (h *RegistrationHandler) RegisterPlugin(pluginName string, endpoint string,
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), csiTimeout)
+	var timeout time.Duration
+	if pluginClientTimeout == nil {
+		timeout = csiTimeout
+	} else {
+		timeout = *pluginClientTimeout
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	driverNodeID, maxVolumePerNode, accessibleTopology, err := csi.NodeGetInfo(ctx)
@@ -241,9 +249,6 @@ func (p *csiPlugin) Init(host volume.VolumeHost) error {
 		},
 		csitranslationplugins.PortworxVolumePluginName: func() bool {
 			return utilfeature.DefaultFeatureGate.Enabled(features.CSIMigrationPortworx)
-		},
-		csitranslationplugins.RBDVolumePluginName: func() bool {
-			return utilfeature.DefaultFeatureGate.Enabled(features.CSIMigrationRBD)
 		},
 	}
 
@@ -362,8 +367,7 @@ func (p *csiPlugin) RequiresRemount(spec *volume.Spec) bool {
 
 func (p *csiPlugin) NewMounter(
 	spec *volume.Spec,
-	pod *api.Pod,
-	_ volume.VolumeOptions) (volume.Mounter, error) {
+	pod *api.Pod) (volume.Mounter, error) {
 
 	volSrc, pvSrc, err := getSourceFromSpec(spec)
 	if err != nil {
@@ -524,10 +528,6 @@ func (p *csiPlugin) SupportsMountOption() bool {
 	return true
 }
 
-func (p *csiPlugin) SupportsBulkVolumeVerification() bool {
-	return false
-}
-
 func (p *csiPlugin) SupportsSELinuxContextMount(spec *volume.Spec) (bool, error) {
 	if utilfeature.DefaultFeatureGate.Enabled(features.SELinuxMountReadWriteOncePod) {
 		driver, err := GetCSIDriverName(spec)
@@ -620,7 +620,7 @@ func (p *csiPlugin) GetDeviceMountRefs(deviceMountPath string) ([]string, error)
 // BlockVolumePlugin methods
 var _ volume.BlockVolumePlugin = &csiPlugin{}
 
-func (p *csiPlugin) NewBlockVolumeMapper(spec *volume.Spec, podRef *api.Pod, opts volume.VolumeOptions) (volume.BlockVolumeMapper, error) {
+func (p *csiPlugin) NewBlockVolumeMapper(spec *volume.Spec, podRef *api.Pod) (volume.BlockVolumeMapper, error) {
 	pvSource, err := getCSISourceFromSpec(spec)
 	if err != nil {
 		return nil, err
@@ -867,12 +867,16 @@ func unregisterDriver(driverName string) error {
 // for a healthy APIServer
 func waitForAPIServerForever(client clientset.Interface, nodeName types.NodeName) error {
 	var lastErr error
+	// Served object is discarded so no risk to have stale object with benefit to
+	// reduce the load on APIServer and etcd.
+	opts := meta.GetOptions{}
+	util.FromApiserverCache(&opts)
 	err := wait.PollImmediateInfinite(time.Second, func() (bool, error) {
 		// Get a CSINode from API server to make sure 1) kubelet can reach API server
 		// and 2) it has enough permissions. Kubelet may have restricted permissions
 		// when it's bootstrapping TLS.
-		// https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet-tls-bootstrapping/
-		_, lastErr = client.StorageV1().CSINodes().Get(context.TODO(), string(nodeName), meta.GetOptions{})
+		// https://kubernetes.io/docs/reference/access-authn-authz/kubelet-tls-bootstrapping/
+		_, lastErr = client.StorageV1().CSINodes().Get(context.TODO(), string(nodeName), opts)
 		if lastErr == nil || apierrors.IsNotFound(lastErr) {
 			// API server contacted
 			return true, nil

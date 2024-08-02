@@ -17,6 +17,7 @@ limitations under the License.
 package portforward
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -31,7 +32,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/client-go/rest/fake"
+	"k8s.io/client-go/tools/portforward"
 	cmdtesting "k8s.io/kubectl/pkg/cmd/testing"
+	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/scheme"
 )
 
@@ -101,6 +104,8 @@ func testPortForward(t *testing.T, flags map[string]string, args []string) {
 			}
 
 			opts := &PortForwardOptions{}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			cmd := NewCmdPortForward(tf, genericiooptions.NewTestIOStreamsDiscard())
 			cmd.Run = func(cmd *cobra.Command, args []string) {
 				if err = opts.Complete(tf, cmd, args); err != nil {
@@ -110,7 +115,7 @@ func testPortForward(t *testing.T, flags map[string]string, args []string) {
 				if err = opts.Validate(); err != nil {
 					return
 				}
-				err = opts.RunPortForward()
+				err = opts.RunPortForwardContext(ctx)
 			}
 
 			for name, value := range flags {
@@ -978,5 +983,40 @@ func TestCheckUDPPort(t *testing.T) {
 		if tc.expectError {
 			t.Errorf("%v: unexpected success", tc.name)
 		}
+	}
+}
+
+func TestCreateDialer(t *testing.T) {
+	url, err := url.Parse("http://localhost:8080/index.html")
+	if err != nil {
+		t.Fatalf("unable to parse test url: %v", err)
+	}
+	config := cmdtesting.DefaultClientConfig()
+	opts := PortForwardOptions{Config: config}
+	// First, ensure that no environment variable creates the fallback dialer.
+	dialer, err := createDialer("GET", url, opts)
+	if err != nil {
+		t.Fatalf("unable to create dialer: %v", err)
+	}
+	if _, isFallback := dialer.(*portforward.FallbackDialer); !isFallback {
+		t.Errorf("expected fallback dialer, got %#v", dialer)
+	}
+	// Next, check turning on feature flag explicitly also creates fallback dialer.
+	t.Setenv(string(cmdutil.PortForwardWebsockets), "true")
+	dialer, err = createDialer("GET", url, opts)
+	if err != nil {
+		t.Fatalf("unable to create dialer: %v", err)
+	}
+	if _, isFallback := dialer.(*portforward.FallbackDialer); !isFallback {
+		t.Errorf("expected fallback dialer, got %#v", dialer)
+	}
+	// Finally, check explicit disabling does NOT create the fallback dialer.
+	t.Setenv(string(cmdutil.PortForwardWebsockets), "false")
+	dialer, err = createDialer("GET", url, opts)
+	if err != nil {
+		t.Fatalf("unable to create dialer: %v", err)
+	}
+	if _, isFallback := dialer.(*portforward.FallbackDialer); isFallback {
+		t.Errorf("expected fallback dialer, got %#v", dialer)
 	}
 }

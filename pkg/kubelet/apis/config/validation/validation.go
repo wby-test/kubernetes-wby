@@ -19,9 +19,11 @@ package validation
 import (
 	"fmt"
 	"time"
+	"unicode"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/component-base/featuregate"
@@ -31,6 +33,7 @@ import (
 	"k8s.io/kubernetes/pkg/features"
 	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
+	utilfs "k8s.io/kubernetes/pkg/util/filesystem"
 	utiltaints "k8s.io/kubernetes/pkg/util/taints"
 	"k8s.io/utils/cpuset"
 )
@@ -52,9 +55,6 @@ func ValidateKubeletConfiguration(kc *kubeletconfig.KubeletConfiguration, featur
 
 	if kc.NodeLeaseDurationSeconds <= 0 {
 		allErrors = append(allErrors, fmt.Errorf("invalid configuration: nodeLeaseDurationSeconds must be greater than 0"))
-	}
-	if !kc.CgroupsPerQOS && len(kc.EnforceNodeAllocatable) > 0 {
-		allErrors = append(allErrors, fmt.Errorf("invalid configuration: enforceNodeAllocatable (--enforce-node-allocatable) is not supported unless cgroupsPerQOS (--cgroups-per-qos) is set to true"))
 	}
 	if kc.SystemCgroups != "" && kc.CgroupRoot == "" {
 		allErrors = append(allErrors, fmt.Errorf("invalid configuration: systemCgroups (--system-cgroups) was specified and cgroupRoot (--cgroup-root) was not specified"))
@@ -193,17 +193,24 @@ func ValidateKubeletConfiguration(kc *kubeletconfig.KubeletConfiguration, featur
 	if localFeatureGate.Enabled(features.NodeSwap) {
 		switch kc.MemorySwap.SwapBehavior {
 		case "":
+		case kubetypes.NoSwap:
 		case kubetypes.LimitedSwap:
-		case kubetypes.UnlimitedSwap:
 		default:
-			allErrors = append(allErrors, fmt.Errorf("invalid configuration: memorySwap.swapBehavior %q must be one of: \"\", %q, or %q", kc.MemorySwap.SwapBehavior, kubetypes.LimitedSwap, kubetypes.UnlimitedSwap))
+			allErrors = append(allErrors, fmt.Errorf("invalid configuration: memorySwap.swapBehavior %q must be one of: \"\", %q or %q", kc.MemorySwap.SwapBehavior, kubetypes.LimitedSwap, kubetypes.NoSwap))
 		}
 	}
 	if !localFeatureGate.Enabled(features.NodeSwap) && kc.MemorySwap != (kubeletconfig.MemorySwapConfiguration{}) {
 		allErrors = append(allErrors, fmt.Errorf("invalid configuration: memorySwap.swapBehavior cannot be set when NodeSwap feature flag is disabled"))
 	}
 
+	uniqueEnforcements := sets.Set[string]{}
 	for _, val := range kc.EnforceNodeAllocatable {
+		if uniqueEnforcements.Has(val) {
+			allErrors = append(allErrors, fmt.Errorf("invalid configuration: duplicated enforcements %q in enforceNodeAllocatable (--enforce-node-allocatable)", val))
+			continue
+		}
+		uniqueEnforcements.Insert(val)
+
 		switch val {
 		case kubetypes.NodeAllocatableEnforcementKey:
 		case kubetypes.SystemReservedEnforcementKey:
@@ -218,9 +225,16 @@ func ValidateKubeletConfiguration(kc *kubeletconfig.KubeletConfiguration, featur
 			if len(kc.EnforceNodeAllocatable) > 1 {
 				allErrors = append(allErrors, fmt.Errorf("invalid configuration: enforceNodeAllocatable (--enforce-node-allocatable) may not contain additional enforcements when %q is specified", kubetypes.NodeAllocatableNoneKey))
 			}
+			// skip all further checks when this is explicitly "none"
+			continue
 		default:
 			allErrors = append(allErrors, fmt.Errorf("invalid configuration: option %q specified for enforceNodeAllocatable (--enforce-node-allocatable). Valid options are %q, %q, %q, or %q",
 				val, kubetypes.NodeAllocatableEnforcementKey, kubetypes.SystemReservedEnforcementKey, kubetypes.KubeReservedEnforcementKey, kubetypes.NodeAllocatableNoneKey))
+			continue
+		}
+
+		if !kc.CgroupsPerQOS {
+			allErrors = append(allErrors, fmt.Errorf("invalid configuration: cgroupsPerQOS (--cgroups-per-qos) must be set to true when %q contained in enforceNodeAllocatable (--enforce-node-allocatable)", val))
 		}
 	}
 	switch kc.HairpinMode {
@@ -286,5 +300,26 @@ func ValidateKubeletConfiguration(kc *kubeletconfig.KubeletConfiguration, featur
 	if kc.ContainerLogMonitorInterval.Duration.Seconds() < 3 {
 		allErrors = append(allErrors, fmt.Errorf("invalid configuration: containerLogMonitorInterval must be a positive time duration greater than or equal to 3s"))
 	}
+
+	if kc.PodLogsDir == "" {
+		allErrors = append(allErrors, fmt.Errorf("invalid configuration: podLogsDir was not specified"))
+	}
+
+	if !utilfs.IsAbs(kc.PodLogsDir) {
+		allErrors = append(allErrors, fmt.Errorf("invalid configuration: pod logs path %q must be absolute path", kc.PodLogsDir))
+	}
+
+	if !utilfs.IsPathClean(kc.PodLogsDir) {
+		allErrors = append(allErrors, fmt.Errorf("invalid configuration: pod logs path %q must be normalized", kc.PodLogsDir))
+	}
+
+	// Since pod logs path is used in metrics, make sure it contains only ASCII characters.
+	for _, c := range kc.PodLogsDir {
+		if c > unicode.MaxASCII {
+			allErrors = append(allErrors, fmt.Errorf("invalid configuration: pod logs path %q mut contains ASCII characters only", kc.PodLogsDir))
+			break
+		}
+	}
+
 	return utilerrors.NewAggregate(allErrors)
 }

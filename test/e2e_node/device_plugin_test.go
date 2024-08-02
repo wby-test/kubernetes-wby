@@ -49,7 +49,6 @@ import (
 	kubeletpodresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 	kubeletpodresourcesv1alpha1 "k8s.io/kubelet/pkg/apis/podresources/v1alpha1"
 	"k8s.io/kubernetes/pkg/features"
-	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
@@ -64,7 +63,7 @@ var (
 )
 
 // Serial because the test restarts Kubelet
-var _ = SIGDescribe("Device Plugin", feature.DevicePluginProbe, nodefeature.DevicePluginProbe, framework.WithSerial(), func() {
+var _ = SIGDescribe("Device Plugin", nodefeature.DevicePlugin, framework.WithSerial(), func() {
 	f := framework.NewDefaultFramework("device-plugin-errors")
 	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 	testDevicePlugin(f, kubeletdevicepluginv1beta1.DevicePluginPath)
@@ -687,21 +686,21 @@ func testDevicePlugin(f *framework.Framework, pluginSockDir string) {
 			gomega.Expect(resourcesForOurPod.Name).To(gomega.Equal(pod1.Name))
 			gomega.Expect(resourcesForOurPod.Namespace).To(gomega.Equal(pod1.Namespace))
 
-			// Note that the kubelet does not report resources for restartable
-			// init containers for now.
-			// See https://github.com/kubernetes/kubernetes/issues/120501.
-			// TODO: Fix this test to check the resources allocated to the
-			// restartable init container once the kubelet reports resources
-			// for restartable init containers.
-			gomega.Expect(resourcesForOurPod.Containers).To(gomega.HaveLen(1))
+			gomega.Expect(resourcesForOurPod.Containers).To(gomega.HaveLen(2))
 
-			gomega.Expect(resourcesForOurPod.Containers[0].Name).To(gomega.Equal(pod1.Spec.Containers[0].Name))
-
-			gomega.Expect(resourcesForOurPod.Containers[0].Devices).To(gomega.HaveLen(1))
-
-			gomega.Expect(resourcesForOurPod.Containers[0].Devices[0].ResourceName).To(gomega.Equal(SampleDeviceResourceName))
-
-			gomega.Expect(resourcesForOurPod.Containers[0].Devices[0].DeviceIds).To(gomega.HaveLen(1))
+			for _, container := range resourcesForOurPod.Containers {
+				if container.Name == pod1.Spec.InitContainers[1].Name {
+					gomega.Expect(container.Devices).To(gomega.HaveLen(1))
+					gomega.Expect(container.Devices[0].ResourceName).To(gomega.Equal(SampleDeviceResourceName))
+					gomega.Expect(container.Devices[0].DeviceIds).To(gomega.HaveLen(1))
+				} else if container.Name == pod1.Spec.Containers[0].Name {
+					gomega.Expect(container.Devices).To(gomega.HaveLen(1))
+					gomega.Expect(container.Devices[0].ResourceName).To(gomega.Equal(SampleDeviceResourceName))
+					gomega.Expect(container.Devices[0].DeviceIds).To(gomega.HaveLen(1))
+				} else {
+					framework.Failf("unexpected container name: %s", container.Name)
+				}
+			}
 		})
 	})
 }
@@ -844,7 +843,7 @@ func testDevicePluginNodeReboot(f *framework.Framework, pluginSockDir string) {
 		// simulate node reboot scenario by removing pods using CRI before kubelet is started. In addition to that,
 		// intentionally a scenario is created where after node reboot, application pods requesting devices appear before the device plugin pod
 		// exposing those devices as resource has restarted. The expected behavior is that the application pod fails at admission time.
-		ginkgo.It("Keeps device plugin assignments across node reboots (no pod restart, no device plugin re-registration)", func(ctx context.Context) {
+		framework.It("Keeps device plugin assignments across node reboots (no pod restart, no device plugin re-registration)", framework.WithFlaky(), func(ctx context.Context) {
 			podRECMD := fmt.Sprintf("devs=$(ls /tmp/ | egrep '^Dev-[0-9]+$') && echo stub devices: $devs && sleep %s", sleepIntervalForever)
 			pod1 := e2epod.NewPodClient(f).CreateSync(ctx, makeBusyboxPod(SampleDeviceResourceName, podRECMD))
 			deviceIDRE := "stub devices: (Dev-[0-9]+)"

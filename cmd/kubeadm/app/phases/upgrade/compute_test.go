@@ -17,12 +17,13 @@ limitations under the License.
 package upgrade
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"os"
-	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,7 +35,16 @@ import (
 )
 
 type fakeVersionGetter struct {
-	clusterVersion, kubeadmVersion, stableVersion, latestVersion, latestDevBranchVersion, stablePatchVersion, kubeletVersion string
+	clusterVersion         string
+	kubeadmVersion         string
+	stableVersion          string
+	latestVersion          string
+	latestDevBranchVersion string
+	stablePatchVersion     string
+	kubeletVersion         string
+	componentVersion       string
+	etcdVersion            string
+	isExternalEtcd         bool
 }
 
 var _ VersionGetter = &fakeVersionGetter{}
@@ -46,11 +56,17 @@ func (f *fakeVersionGetter) ClusterVersion() (string, *versionutil.Version, erro
 
 // KubeadmVersion gets a fake kubeadm version
 func (f *fakeVersionGetter) KubeadmVersion() (string, *versionutil.Version, error) {
+	if f.kubeadmVersion == "" {
+		return "", nil, errors.New("get kubeadm version error")
+	}
 	return f.kubeadmVersion, versionutil.MustParseSemantic(f.kubeadmVersion), nil
 }
 
 // VersionFromCILabel gets fake latest versions from CI
 func (f *fakeVersionGetter) VersionFromCILabel(ciVersionLabel, _ string) (string, *versionutil.Version, error) {
+	if f.stableVersion == "" {
+		return "", nil, errors.New("fake error")
+	}
 	if ciVersionLabel == "stable" {
 		return f.stableVersion, versionutil.MustParseSemantic(f.stableVersion), nil
 	}
@@ -63,26 +79,44 @@ func (f *fakeVersionGetter) VersionFromCILabel(ciVersionLabel, _ string) (string
 	return f.stablePatchVersion, versionutil.MustParseSemantic(f.stablePatchVersion), nil
 }
 
-// KubeletVersions gets the versions of the kubelets in the cluster
-func (f *fakeVersionGetter) KubeletVersions() (map[string]uint16, error) {
-	return map[string]uint16{
-		f.kubeletVersion: 1,
+// KubeletVersions should return a map with a version and a list of node names that describes how many kubelets there are for that version
+func (f *fakeVersionGetter) KubeletVersions() (map[string][]string, error) {
+	if f.kubeletVersion == "" {
+		return nil, errors.New("get kubelet version failed")
+	}
+	return map[string][]string{
+		f.kubeletVersion: {"node1"},
+	}, nil
+}
+
+// ComponentVersions should return a map with a version and a list of node names that describes how many a given control-plane components there are for that version
+func (f *fakeVersionGetter) ComponentVersions(name string) (map[string][]string, error) {
+	if name == constants.Etcd {
+		if f.isExternalEtcd {
+			return map[string][]string{}, nil
+		}
+		return map[string][]string{
+			f.etcdVersion: {"node1"},
+		}, nil
+	}
+
+	if f.componentVersion == "" {
+		return nil, errors.New("get component version failed")
+	}
+
+	if f.componentVersion == "multiVersion" {
+		return map[string][]string{
+			"node1": {"node1"},
+			"node2": {"node2"},
+		}, nil
+	}
+
+	return map[string][]string{
+		f.componentVersion: {"node1"},
 	}, nil
 }
 
 const fakeCurrentEtcdVersion = "3.1.12"
-const etcdStaticPod = `apiVersion: v1
-kind: Pod
-metadata:
-  labels:
-    component: etcd
-    tier: control-plane
-  name: etcd
-  namespace: kube-system
-spec:
-  containers:
-  - name: etcd
-    image: registry.k8s.io/etcd:` + fakeCurrentEtcdVersion
 
 func getEtcdVersion(v *versionutil.Version) string {
 	etcdVer, _, _ := constants.EtcdSupportedVersion(constants.SupportedEtcdVersion, v.String())
@@ -123,15 +157,17 @@ func TestGetAvailableUpgrades(t *testing.T) {
 		expectedUpgrades            []Upgrade
 		allowExperimental, allowRCs bool
 		errExpected                 bool
-		externalEtcd                bool
 		beforeDNSVersion            string
+		deployDNSFailed             bool
 	}{
 		{
 			name: "no action needed, already up-to-date",
 			vg: &fakeVersionGetter{
-				clusterVersion: v1Y0.String(),
-				kubeletVersion: v1Y0.String(),
-				kubeadmVersion: v1Y0.String(),
+				clusterVersion:   v1Y0.String(),
+				componentVersion: v1Y0.String(),
+				kubeletVersion:   v1Y0.String(),
+				kubeadmVersion:   v1Y0.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
 
 				stablePatchVersion: v1Y0.String(),
 				stableVersion:      v1Y0.String(),
@@ -142,11 +178,117 @@ func TestGetAvailableUpgrades(t *testing.T) {
 			errExpected:       false,
 		},
 		{
+			name: "get component version failed",
+			vg: &fakeVersionGetter{
+				clusterVersion:   v1Y0.String(),
+				componentVersion: "",
+				kubeletVersion:   v1Y0.String(),
+				kubeadmVersion:   v1Y0.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
+
+				stablePatchVersion: v1Y0.String(),
+				stableVersion:      v1Y0.String(),
+			},
+			beforeDNSVersion:  fakeCurrentCoreDNSVersion,
+			expectedUpgrades:  nil,
+			allowExperimental: false,
+			errExpected:       true,
+		},
+		{
+			name: "there is version information about multiple components",
+			vg: &fakeVersionGetter{
+				clusterVersion:   v1Y0.String(),
+				componentVersion: "multiVersion",
+				kubeletVersion:   v1Y0.String(),
+				kubeadmVersion:   v1Y0.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
+
+				stablePatchVersion: v1Y0.String(),
+				stableVersion:      v1Y0.String(),
+			},
+			beforeDNSVersion:  fakeCurrentCoreDNSVersion,
+			expectedUpgrades:  nil,
+			allowExperimental: false,
+			errExpected:       true,
+		},
+		{
+			name: "get kubeadm version failed",
+			vg: &fakeVersionGetter{
+				clusterVersion:   v1Y0.String(),
+				componentVersion: v1Y0.String(),
+				kubeletVersion:   v1Y0.String(),
+				kubeadmVersion:   "",
+				etcdVersion:      fakeCurrentEtcdVersion,
+
+				stablePatchVersion: v1Y0.String(),
+				stableVersion:      v1Y0.String(),
+			},
+			beforeDNSVersion:  fakeCurrentCoreDNSVersion,
+			expectedUpgrades:  nil,
+			allowExperimental: false,
+			errExpected:       true,
+		},
+		{
+			name: "get kubelet version failed",
+			vg: &fakeVersionGetter{
+				clusterVersion:   v1Y0.String(),
+				componentVersion: v1Y0.String(),
+				kubeletVersion:   "",
+				kubeadmVersion:   v1Y0.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
+
+				stablePatchVersion: v1Y0.String(),
+				stableVersion:      v1Y0.String(),
+			},
+			beforeDNSVersion:  fakeCurrentCoreDNSVersion,
+			expectedUpgrades:  nil,
+			allowExperimental: false,
+			errExpected:       true,
+		},
+		{
+			name: "deploy DNS failed",
+			vg: &fakeVersionGetter{
+				clusterVersion:   v1Y0.String(),
+				componentVersion: v1Y0.String(),
+				kubeletVersion:   v1Y0.String(),
+				kubeadmVersion:   v1Y0.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
+
+				stablePatchVersion: v1Y0.String(),
+				stableVersion:      v1Y0.String(),
+			},
+			beforeDNSVersion: fakeCurrentCoreDNSVersion,
+
+			expectedUpgrades:  nil,
+			allowExperimental: false,
+			errExpected:       false,
+		},
+		{
+			name: "get stable version from CI label failed",
+			vg: &fakeVersionGetter{
+				clusterVersion:   v1Y0.String(),
+				componentVersion: v1Y0.String(),
+				kubeletVersion:   v1Y0.String(),
+				kubeadmVersion:   v1Y0.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
+
+				stablePatchVersion: v1Y0.String(),
+				stableVersion:      "",
+			},
+			beforeDNSVersion:  fakeCurrentCoreDNSVersion,
+			deployDNSFailed:   true,
+			expectedUpgrades:  nil,
+			allowExperimental: false,
+			errExpected:       true,
+		},
+		{
 			name: "simple patch version upgrade",
 			vg: &fakeVersionGetter{
-				clusterVersion: v1Y1.String(),
-				kubeletVersion: v1Y1.String(), // the kubelet are on the same version as the control plane
-				kubeadmVersion: v1Y2.String(),
+				clusterVersion:   v1Y1.String(),
+				componentVersion: v1Y1.String(),
+				kubeletVersion:   v1Y1.String(), // the kubelet are on the same version as the control plane
+				kubeadmVersion:   v1Y2.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
 
 				stablePatchVersion: v1Y3.String(),
 				stableVersion:      v1Y3.String(),
@@ -157,12 +299,21 @@ func TestGetAvailableUpgrades(t *testing.T) {
 					Description: fmt.Sprintf("version in the v%d.%d series", v1Y0.Major(), v1Y0.Minor()),
 					Before: ClusterState{
 						KubeVersion: v1Y1.String(),
-						KubeletVersions: map[string]uint16{
-							v1Y1.String(): 1,
+						KubeAPIServerVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
+						},
+						KubeControllerManagerVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
+						},
+						KubeSchedulerVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
+						},
+						KubeletVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
 						},
 						KubeadmVersion: v1Y2.String(),
 						DNSVersion:     fakeCurrentCoreDNSVersion,
-						EtcdVersion:    fakeCurrentEtcdVersion,
+						EtcdVersions:   map[string][]string{fakeCurrentEtcdVersion: {"node1"}},
 					},
 					After: ClusterState{
 						KubeVersion:    v1Y3.String(),
@@ -178,26 +329,36 @@ func TestGetAvailableUpgrades(t *testing.T) {
 		{
 			name: "simple patch version upgrade with external etcd",
 			vg: &fakeVersionGetter{
-				clusterVersion: v1Y1.String(),
-				kubeletVersion: v1Y1.String(), // the kubelet are on the same version as the control plane
-				kubeadmVersion: v1Y2.String(),
+				clusterVersion:   v1Y1.String(),
+				componentVersion: v1Y1.String(),
+				kubeletVersion:   v1Y1.String(), // the kubelet are on the same version as the control plane
+				kubeadmVersion:   v1Y2.String(),
+				isExternalEtcd:   true,
 
 				stablePatchVersion: v1Y3.String(),
 				stableVersion:      v1Y3.String(),
 			},
 			beforeDNSVersion: fakeCurrentCoreDNSVersion,
-			externalEtcd:     true,
 			expectedUpgrades: []Upgrade{
 				{
 					Description: fmt.Sprintf("version in the v%d.%d series", v1Y0.Major(), v1Y0.Minor()),
 					Before: ClusterState{
 						KubeVersion: v1Y1.String(),
-						KubeletVersions: map[string]uint16{
-							v1Y1.String(): 1,
+						KubeAPIServerVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
 						},
+						KubeControllerManagerVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
+						},
+						KubeSchedulerVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
+						},
+						KubeletVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
+						},
+						EtcdVersions:   map[string][]string{},
 						KubeadmVersion: v1Y2.String(),
 						DNSVersion:     fakeCurrentCoreDNSVersion,
-						EtcdVersion:    "",
 					},
 					After: ClusterState{
 						KubeVersion:    v1Y3.String(),
@@ -213,9 +374,11 @@ func TestGetAvailableUpgrades(t *testing.T) {
 		{
 			name: "no version provided to offline version getter does not change behavior",
 			vg: NewOfflineVersionGetter(&fakeVersionGetter{
-				clusterVersion: v1Y1.String(),
-				kubeletVersion: v1Y1.String(), // the kubelet are on the same version as the control plane
-				kubeadmVersion: v1Y2.String(),
+				clusterVersion:   v1Y1.String(),
+				componentVersion: v1Y1.String(),
+				kubeletVersion:   v1Y1.String(), // the kubelet are on the same version as the control plane
+				kubeadmVersion:   v1Y2.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
 
 				stablePatchVersion: v1Y3.String(),
 				stableVersion:      v1Y3.String(),
@@ -226,12 +389,21 @@ func TestGetAvailableUpgrades(t *testing.T) {
 					Description: fmt.Sprintf("version in the v%d.%d series", v1Y0.Major(), v1Y0.Minor()),
 					Before: ClusterState{
 						KubeVersion: v1Y1.String(),
-						KubeletVersions: map[string]uint16{
-							v1Y1.String(): 1,
+						KubeAPIServerVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
+						},
+						KubeControllerManagerVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
+						},
+						KubeSchedulerVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
+						},
+						KubeletVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
 						},
 						KubeadmVersion: v1Y2.String(),
 						DNSVersion:     fakeCurrentCoreDNSVersion,
-						EtcdVersion:    fakeCurrentEtcdVersion,
+						EtcdVersions:   map[string][]string{fakeCurrentEtcdVersion: {"node1"}},
 					},
 					After: ClusterState{
 						KubeVersion:    v1Y3.String(),
@@ -247,9 +419,11 @@ func TestGetAvailableUpgrades(t *testing.T) {
 		{
 			name: "minor version upgrade only",
 			vg: &fakeVersionGetter{
-				clusterVersion: v1Y1.String(),
-				kubeletVersion: v1Y1.String(), // the kubelet are on the same version as the control plane
-				kubeadmVersion: v1Z0.String(),
+				clusterVersion:   v1Y1.String(),
+				componentVersion: v1Y1.String(),
+				kubeletVersion:   v1Y1.String(), // the kubelet are on the same version as the control plane
+				kubeadmVersion:   v1Z0.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
 
 				stablePatchVersion: v1Y1.String(),
 				stableVersion:      v1Z0.String(),
@@ -260,12 +434,21 @@ func TestGetAvailableUpgrades(t *testing.T) {
 					Description: "stable version",
 					Before: ClusterState{
 						KubeVersion: v1Y1.String(),
-						KubeletVersions: map[string]uint16{
-							v1Y1.String(): 1,
+						KubeAPIServerVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
+						},
+						KubeControllerManagerVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
+						},
+						KubeSchedulerVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
+						},
+						KubeletVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
 						},
 						KubeadmVersion: v1Z0.String(),
 						DNSVersion:     fakeCurrentCoreDNSVersion,
-						EtcdVersion:    fakeCurrentEtcdVersion,
+						EtcdVersions:   map[string][]string{fakeCurrentEtcdVersion: {"node1"}},
 					},
 					After: ClusterState{
 						KubeVersion:    v1Z0.String(),
@@ -281,9 +464,11 @@ func TestGetAvailableUpgrades(t *testing.T) {
 		{
 			name: "both minor version upgrade and patch version upgrade available",
 			vg: &fakeVersionGetter{
-				clusterVersion: v1Y3.String(),
-				kubeletVersion: v1Y3.String(), // the kubelet are on the same version as the control plane
-				kubeadmVersion: v1Y5.String(),
+				clusterVersion:   v1Y3.String(),
+				componentVersion: v1Y3.String(),
+				kubeletVersion:   v1Y3.String(), // the kubelet are on the same version as the control plane
+				kubeadmVersion:   v1Y5.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
 
 				stablePatchVersion: v1Y5.String(),
 				stableVersion:      v1Z1.String(),
@@ -294,12 +479,21 @@ func TestGetAvailableUpgrades(t *testing.T) {
 					Description: fmt.Sprintf("version in the v%d.%d series", v1Y0.Major(), v1Y0.Minor()),
 					Before: ClusterState{
 						KubeVersion: v1Y3.String(),
-						KubeletVersions: map[string]uint16{
-							v1Y3.String(): 1,
+						KubeAPIServerVersions: map[string][]string{
+							v1Y3.String(): {"node1"},
+						},
+						KubeControllerManagerVersions: map[string][]string{
+							v1Y3.String(): {"node1"},
+						},
+						KubeSchedulerVersions: map[string][]string{
+							v1Y3.String(): {"node1"},
+						},
+						KubeletVersions: map[string][]string{
+							v1Y3.String(): {"node1"},
 						},
 						KubeadmVersion: v1Y5.String(),
 						DNSVersion:     fakeCurrentCoreDNSVersion,
-						EtcdVersion:    fakeCurrentEtcdVersion,
+						EtcdVersions:   map[string][]string{fakeCurrentEtcdVersion: {"node1"}},
 					},
 					After: ClusterState{
 						KubeVersion:    v1Y5.String(),
@@ -312,12 +506,21 @@ func TestGetAvailableUpgrades(t *testing.T) {
 					Description: "stable version",
 					Before: ClusterState{
 						KubeVersion: v1Y3.String(),
-						KubeletVersions: map[string]uint16{
-							v1Y3.String(): 1,
+						KubeAPIServerVersions: map[string][]string{
+							v1Y3.String(): {"node1"},
+						},
+						KubeControllerManagerVersions: map[string][]string{
+							v1Y3.String(): {"node1"},
+						},
+						KubeSchedulerVersions: map[string][]string{
+							v1Y3.String(): {"node1"},
+						},
+						KubeletVersions: map[string][]string{
+							v1Y3.String(): {"node1"},
 						},
 						KubeadmVersion: v1Y5.String(),
 						DNSVersion:     fakeCurrentCoreDNSVersion,
-						EtcdVersion:    fakeCurrentEtcdVersion,
+						EtcdVersions:   map[string][]string{fakeCurrentEtcdVersion: {"node1"}},
 					},
 					After: ClusterState{
 						KubeVersion:    v1Z1.String(),
@@ -333,9 +536,11 @@ func TestGetAvailableUpgrades(t *testing.T) {
 		{
 			name: "allow experimental upgrades, but no upgrade available",
 			vg: &fakeVersionGetter{
-				clusterVersion: v1Z0alpha2.String(),
-				kubeletVersion: v1Y5.String(),
-				kubeadmVersion: v1Y5.String(),
+				clusterVersion:   v1Z0alpha2.String(),
+				componentVersion: v1Z0alpha2.String(),
+				kubeletVersion:   v1Y5.String(),
+				kubeadmVersion:   v1Y5.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
 
 				stablePatchVersion: v1Y5.String(),
 				stableVersion:      v1Y5.String(),
@@ -349,9 +554,11 @@ func TestGetAvailableUpgrades(t *testing.T) {
 		{
 			name: "upgrade to an unstable version should be supported",
 			vg: &fakeVersionGetter{
-				clusterVersion: v1Y5.String(),
-				kubeletVersion: v1Y5.String(),
-				kubeadmVersion: v1Y5.String(),
+				clusterVersion:   v1Y5.String(),
+				componentVersion: v1Y5.String(),
+				kubeletVersion:   v1Y5.String(),
+				kubeadmVersion:   v1Y5.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
 
 				stablePatchVersion: v1Y5.String(),
 				stableVersion:      v1Y5.String(),
@@ -363,12 +570,21 @@ func TestGetAvailableUpgrades(t *testing.T) {
 					Description: "experimental version",
 					Before: ClusterState{
 						KubeVersion: v1Y5.String(),
-						KubeletVersions: map[string]uint16{
-							v1Y5.String(): 1,
+						KubeAPIServerVersions: map[string][]string{
+							v1Y5.String(): {"node1"},
+						},
+						KubeControllerManagerVersions: map[string][]string{
+							v1Y5.String(): {"node1"},
+						},
+						KubeSchedulerVersions: map[string][]string{
+							v1Y5.String(): {"node1"},
+						},
+						KubeletVersions: map[string][]string{
+							v1Y5.String(): {"node1"},
 						},
 						KubeadmVersion: v1Y5.String(),
 						DNSVersion:     fakeCurrentCoreDNSVersion,
-						EtcdVersion:    fakeCurrentEtcdVersion,
+						EtcdVersions:   map[string][]string{fakeCurrentEtcdVersion: {"node1"}},
 					},
 					After: ClusterState{
 						KubeVersion:    v1Z0alpha2.String(),
@@ -384,9 +600,11 @@ func TestGetAvailableUpgrades(t *testing.T) {
 		{
 			name: "upgrade from an unstable version to an unstable version should be supported",
 			vg: &fakeVersionGetter{
-				clusterVersion: v1Z0alpha1.String(),
-				kubeletVersion: v1Y5.String(),
-				kubeadmVersion: v1Y5.String(),
+				clusterVersion:   v1Z0alpha1.String(),
+				componentVersion: v1Z0alpha1.String(),
+				kubeletVersion:   v1Y5.String(),
+				kubeadmVersion:   v1Y5.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
 
 				stablePatchVersion: v1Y5.String(),
 				stableVersion:      v1Y5.String(),
@@ -398,12 +616,21 @@ func TestGetAvailableUpgrades(t *testing.T) {
 					Description: "experimental version",
 					Before: ClusterState{
 						KubeVersion: v1Z0alpha1.String(),
-						KubeletVersions: map[string]uint16{
-							v1Y5.String(): 1,
+						KubeAPIServerVersions: map[string][]string{
+							v1Z0alpha1.String(): {"node1"},
+						},
+						KubeControllerManagerVersions: map[string][]string{
+							v1Z0alpha1.String(): {"node1"},
+						},
+						KubeSchedulerVersions: map[string][]string{
+							v1Z0alpha1.String(): {"node1"},
+						},
+						KubeletVersions: map[string][]string{
+							v1Y5.String(): {"node1"},
 						},
 						KubeadmVersion: v1Y5.String(),
 						DNSVersion:     fakeCurrentCoreDNSVersion,
-						EtcdVersion:    fakeCurrentEtcdVersion,
+						EtcdVersions:   map[string][]string{fakeCurrentEtcdVersion: {"node1"}},
 					},
 					After: ClusterState{
 						KubeVersion:    v1Z0alpha2.String(),
@@ -419,9 +646,11 @@ func TestGetAvailableUpgrades(t *testing.T) {
 		{
 			name: "v1.X.0-alpha.0 should be ignored",
 			vg: &fakeVersionGetter{
-				clusterVersion: v1X5.String(),
-				kubeletVersion: v1X5.String(),
-				kubeadmVersion: v1X5.String(),
+				clusterVersion:   v1X5.String(),
+				componentVersion: v1X5.String(),
+				kubeletVersion:   v1X5.String(),
+				kubeadmVersion:   v1X5.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
 
 				stablePatchVersion:     v1X5.String(),
 				stableVersion:          v1X5.String(),
@@ -434,12 +663,21 @@ func TestGetAvailableUpgrades(t *testing.T) {
 					Description: "experimental version",
 					Before: ClusterState{
 						KubeVersion: v1X5.String(),
-						KubeletVersions: map[string]uint16{
-							v1X5.String(): 1,
+						KubeAPIServerVersions: map[string][]string{
+							v1X5.String(): {"node1"},
+						},
+						KubeControllerManagerVersions: map[string][]string{
+							v1X5.String(): {"node1"},
+						},
+						KubeSchedulerVersions: map[string][]string{
+							v1X5.String(): {"node1"},
+						},
+						KubeletVersions: map[string][]string{
+							v1X5.String(): {"node1"},
 						},
 						KubeadmVersion: v1X5.String(),
 						DNSVersion:     fakeCurrentCoreDNSVersion,
-						EtcdVersion:    fakeCurrentEtcdVersion,
+						EtcdVersions:   map[string][]string{fakeCurrentEtcdVersion: {"node1"}},
 					},
 					After: ClusterState{
 						KubeVersion:    v1Z0beta1.String(),
@@ -455,9 +693,11 @@ func TestGetAvailableUpgrades(t *testing.T) {
 		{
 			name: "upgrade to an RC version should be supported",
 			vg: &fakeVersionGetter{
-				clusterVersion: v1X5.String(),
-				kubeletVersion: v1X5.String(),
-				kubeadmVersion: v1X5.String(),
+				clusterVersion:   v1X5.String(),
+				componentVersion: v1X5.String(),
+				kubeletVersion:   v1X5.String(),
+				kubeadmVersion:   v1X5.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
 
 				stablePatchVersion:     v1X5.String(),
 				stableVersion:          v1X5.String(),
@@ -470,12 +710,21 @@ func TestGetAvailableUpgrades(t *testing.T) {
 					Description: "release candidate version",
 					Before: ClusterState{
 						KubeVersion: v1X5.String(),
-						KubeletVersions: map[string]uint16{
-							v1X5.String(): 1,
+						KubeAPIServerVersions: map[string][]string{
+							v1X5.String(): {"node1"},
+						},
+						KubeControllerManagerVersions: map[string][]string{
+							v1X5.String(): {"node1"},
+						},
+						KubeSchedulerVersions: map[string][]string{
+							v1X5.String(): {"node1"},
+						},
+						KubeletVersions: map[string][]string{
+							v1X5.String(): {"node1"},
 						},
 						KubeadmVersion: v1X5.String(),
 						DNSVersion:     fakeCurrentCoreDNSVersion,
-						EtcdVersion:    fakeCurrentEtcdVersion,
+						EtcdVersions:   map[string][]string{fakeCurrentEtcdVersion: {"node1"}},
 					},
 					After: ClusterState{
 						KubeVersion:    v1Z0rc1.String(),
@@ -491,9 +740,11 @@ func TestGetAvailableUpgrades(t *testing.T) {
 		{
 			name: "it is possible (but very uncommon) that the latest version from the previous branch is an rc and the current latest version is alpha.0. In that case, show the RC",
 			vg: &fakeVersionGetter{
-				clusterVersion: v1X5.String(),
-				kubeletVersion: v1X5.String(),
-				kubeadmVersion: v1X5.String(),
+				clusterVersion:   v1X5.String(),
+				componentVersion: v1X5.String(),
+				kubeletVersion:   v1X5.String(),
+				kubeadmVersion:   v1X5.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
 
 				stablePatchVersion:     v1X5.String(),
 				stableVersion:          v1X5.String(),
@@ -506,12 +757,21 @@ func TestGetAvailableUpgrades(t *testing.T) {
 					Description: "experimental version", // Note that this is considered an experimental version in this uncommon scenario
 					Before: ClusterState{
 						KubeVersion: v1X5.String(),
-						KubeletVersions: map[string]uint16{
-							v1X5.String(): 1,
+						KubeAPIServerVersions: map[string][]string{
+							v1X5.String(): {"node1"},
+						},
+						KubeControllerManagerVersions: map[string][]string{
+							v1X5.String(): {"node1"},
+						},
+						KubeSchedulerVersions: map[string][]string{
+							v1X5.String(): {"node1"},
+						},
+						KubeletVersions: map[string][]string{
+							v1X5.String(): {"node1"},
 						},
 						KubeadmVersion: v1X5.String(),
 						DNSVersion:     fakeCurrentCoreDNSVersion,
-						EtcdVersion:    fakeCurrentEtcdVersion,
+						EtcdVersions:   map[string][]string{fakeCurrentEtcdVersion: {"node1"}},
 					},
 					After: ClusterState{
 						KubeVersion:    v1Z0rc1.String(),
@@ -527,9 +787,11 @@ func TestGetAvailableUpgrades(t *testing.T) {
 		{
 			name: "upgrade to an RC version should be supported. There may also be an even newer unstable version.",
 			vg: &fakeVersionGetter{
-				clusterVersion: v1X5.String(),
-				kubeletVersion: v1X5.String(),
-				kubeadmVersion: v1X5.String(),
+				clusterVersion:   v1X5.String(),
+				componentVersion: v1X5.String(),
+				kubeletVersion:   v1X5.String(),
+				kubeadmVersion:   v1X5.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
 
 				stablePatchVersion:     v1X5.String(),
 				stableVersion:          v1X5.String(),
@@ -542,12 +804,21 @@ func TestGetAvailableUpgrades(t *testing.T) {
 					Description: "release candidate version",
 					Before: ClusterState{
 						KubeVersion: v1X5.String(),
-						KubeletVersions: map[string]uint16{
-							v1X5.String(): 1,
+						KubeAPIServerVersions: map[string][]string{
+							v1X5.String(): {"node1"},
+						},
+						KubeControllerManagerVersions: map[string][]string{
+							v1X5.String(): {"node1"},
+						},
+						KubeSchedulerVersions: map[string][]string{
+							v1X5.String(): {"node1"},
+						},
+						KubeletVersions: map[string][]string{
+							v1X5.String(): {"node1"},
 						},
 						KubeadmVersion: v1X5.String(),
 						DNSVersion:     fakeCurrentCoreDNSVersion,
-						EtcdVersion:    fakeCurrentEtcdVersion,
+						EtcdVersions:   map[string][]string{fakeCurrentEtcdVersion: {"node1"}},
 					},
 					After: ClusterState{
 						KubeVersion:    v1Z0rc1.String(),
@@ -560,12 +831,21 @@ func TestGetAvailableUpgrades(t *testing.T) {
 					Description: "experimental version",
 					Before: ClusterState{
 						KubeVersion: v1X5.String(),
-						KubeletVersions: map[string]uint16{
-							v1X5.String(): 1,
+						KubeAPIServerVersions: map[string][]string{
+							v1X5.String(): {"node1"},
+						},
+						KubeControllerManagerVersions: map[string][]string{
+							v1X5.String(): {"node1"},
+						},
+						KubeSchedulerVersions: map[string][]string{
+							v1X5.String(): {"node1"},
+						},
+						KubeletVersions: map[string][]string{
+							v1X5.String(): {"node1"},
 						},
 						KubeadmVersion: v1X5.String(),
 						DNSVersion:     fakeCurrentCoreDNSVersion,
-						EtcdVersion:    fakeCurrentEtcdVersion,
+						EtcdVersions:   map[string][]string{fakeCurrentEtcdVersion: {"node1"}},
 					},
 					After: ClusterState{
 						KubeVersion:    v1Y0alpha1.String(),
@@ -582,9 +862,11 @@ func TestGetAvailableUpgrades(t *testing.T) {
 		{
 			name: "offline version getter",
 			vg: NewOfflineVersionGetter(&fakeVersionGetter{
-				clusterVersion: v1Y1.String(),
-				kubeletVersion: v1Y0.String(),
-				kubeadmVersion: v1Y1.String(),
+				clusterVersion:   v1Y1.String(),
+				componentVersion: v1Y1.String(),
+				kubeletVersion:   v1Y0.String(),
+				kubeadmVersion:   v1Y1.String(),
+				etcdVersion:      fakeCurrentEtcdVersion,
 			}, v1Z1.String()),
 			beforeDNSVersion: fakeCurrentCoreDNSVersion,
 			expectedUpgrades: []Upgrade{
@@ -592,12 +874,21 @@ func TestGetAvailableUpgrades(t *testing.T) {
 					Description: fmt.Sprintf("version in the v%d.%d series", v1Y0.Major(), v1Y0.Minor()),
 					Before: ClusterState{
 						KubeVersion: v1Y1.String(),
-						KubeletVersions: map[string]uint16{
-							v1Y0.String(): 1,
+						KubeAPIServerVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
+						},
+						KubeControllerManagerVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
+						},
+						KubeSchedulerVersions: map[string][]string{
+							v1Y1.String(): {"node1"},
+						},
+						KubeletVersions: map[string][]string{
+							v1Y0.String(): {"node1"},
 						},
 						KubeadmVersion: v1Y1.String(),
 						DNSVersion:     fakeCurrentCoreDNSVersion,
-						EtcdVersion:    fakeCurrentEtcdVersion,
+						EtcdVersions:   map[string][]string{fakeCurrentEtcdVersion: {"node1"}},
 					},
 					After: ClusterState{
 						KubeVersion:    v1Z1.String(),
@@ -617,52 +908,20 @@ func TestGetAvailableUpgrades(t *testing.T) {
 
 			dnsName := constants.CoreDNSDeploymentName
 
-			client := clientsetfake.NewSimpleClientset(&apps.Deployment{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "Deployment",
-					APIVersion: "apps/v1",
-				},
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      dnsName,
-					Namespace: "kube-system",
-					Labels: map[string]string{
-						"k8s-app": "kube-dns",
-					},
-				},
-				Spec: apps.DeploymentSpec{
-					Template: v1.PodTemplateSpec{
-						Spec: v1.PodSpec{
-							Containers: []v1.Container{
-								{
-									Image: "test:" + rt.beforeDNSVersion,
-								},
-							},
-						},
-					},
-				},
-			})
+			client := newMockClientForTest(t, dnsName, rt.beforeDNSVersion, rt.deployDNSFailed)
 
-			manifestsDir, err := os.MkdirTemp("", "GetAvailableUpgrades-test-manifests")
-			if err != nil {
-				t.Fatalf("Unable to create temporary directory: %v", err)
-			}
-			defer os.RemoveAll(manifestsDir)
-
-			if err = os.WriteFile(constants.GetStaticPodFilepath(constants.Etcd, manifestsDir), []byte(etcdStaticPod), 0644); err != nil {
-				t.Fatalf("Unable to create test static pod manifest: %v", err)
-			}
-
-			actualUpgrades, actualErr := GetAvailableUpgrades(rt.vg, rt.allowExperimental, rt.allowRCs, rt.externalEtcd, client, manifestsDir, &output.TextPrinter{})
-			if !reflect.DeepEqual(actualUpgrades, rt.expectedUpgrades) {
-				t.Errorf("failed TestGetAvailableUpgrades\n\texpected upgrades: %v\n\tgot: %v", rt.expectedUpgrades, actualUpgrades)
+			actualUpgrades, actualErr := GetAvailableUpgrades(rt.vg, rt.allowExperimental, rt.allowRCs, client, &output.TextPrinter{})
+			if diff := cmp.Diff(rt.expectedUpgrades, actualUpgrades); len(diff) > 0 {
+				t.Errorf("failed TestGetAvailableUpgrades\n\texpected upgrades:\n%v\n\tgot:\n%v\n\tdiff:\n%v", rt.expectedUpgrades, actualUpgrades, diff)
 			}
 			if rt.errExpected && actualErr == nil {
 				t.Error("unexpected success")
 			} else if !rt.errExpected && actualErr != nil {
 				t.Errorf("unexpected failure: %v", actualErr)
 			}
-			if !reflect.DeepEqual(actualUpgrades, rt.expectedUpgrades) {
-				t.Errorf("failed TestGetAvailableUpgrades\n\texpected upgrades: %v\n\tgot: %v", rt.expectedUpgrades, actualUpgrades)
+			if diff := cmp.Diff(rt.expectedUpgrades, actualUpgrades); len(diff) > 0 {
+				t.Logf("diff: %s", cmp.Diff(rt.expectedUpgrades, actualUpgrades))
+				t.Errorf("failed TestGetAvailableUpgrades\n\texpected upgrades:\n%v\n\tgot:\n%v\n\tdiff:\n%v", rt.expectedUpgrades, actualUpgrades, diff)
 			}
 		})
 	}
@@ -671,46 +930,46 @@ func TestGetAvailableUpgrades(t *testing.T) {
 func TestKubeletUpgrade(t *testing.T) {
 	tests := []struct {
 		name     string
-		before   map[string]uint16
+		before   map[string][]string
 		after    string
 		expected bool
 	}{
 		{
 			name: "upgrade from v1.10.1 to v1.10.3 is available",
-			before: map[string]uint16{
-				"v1.10.1": 1,
+			before: map[string][]string{
+				"v1.10.1": {"node1"},
 			},
 			after:    "v1.10.3",
 			expected: true,
 		},
 		{
-			name: "upgrade from v1.10.1 and v1.10.3/100 to v1.10.3 is available",
-			before: map[string]uint16{
-				"v1.10.1": 1,
-				"v1.10.3": 100,
+			name: "upgrade from v1.10.1 and v1.10.3/2 to v1.10.3 is available",
+			before: map[string][]string{
+				"v1.10.1": {"node1"},
+				"v1.10.3": {"node2", "node3"},
 			},
 			after:    "v1.10.3",
 			expected: true,
 		},
 		{
 			name: "upgrade from v1.10.3 to v1.10.3 is not available",
-			before: map[string]uint16{
-				"v1.10.3": 1,
+			before: map[string][]string{
+				"v1.10.3": {"node1"},
 			},
 			after:    "v1.10.3",
 			expected: false,
 		},
 		{
-			name: "upgrade from v1.10.3/100 to v1.10.3 is not available",
-			before: map[string]uint16{
-				"v1.10.3": 100,
+			name: "upgrade from v1.10.3/2 to v1.10.3 is not available",
+			before: map[string][]string{
+				"v1.10.3": {"node1", "node2"},
 			},
 			after:    "v1.10.3",
 			expected: false,
 		},
 		{
 			name:     "upgrade is not available if we don't know anything about the earlier state",
-			before:   map[string]uint16{},
+			before:   map[string][]string{},
 			after:    "v1.10.3",
 			expected: false,
 		},
@@ -839,4 +1098,43 @@ func TestGetSuggestedEtcdVersion(t *testing.T) {
 			}
 		})
 	}
+}
+
+func newMockClientForTest(t *testing.T, dnsName string, dnsVersion string, multiDNS bool) *clientsetfake.Clientset {
+	client := clientsetfake.NewSimpleClientset()
+	createDeployment := func(name string) {
+		_, err := client.AppsV1().Deployments(metav1.NamespaceSystem).Create(context.TODO(), &apps.Deployment{
+			TypeMeta: metav1.TypeMeta{
+				Kind:       "Deployment",
+				APIVersion: "apps/v1",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      dnsName + name,
+				Namespace: "kube-system",
+				Labels: map[string]string{
+					"k8s-app": "kube-dns",
+				},
+			},
+			Spec: apps.DeploymentSpec{
+				Template: v1.PodTemplateSpec{
+					Spec: v1.PodSpec{
+						Containers: []v1.Container{
+							{
+								Image: "test:" + dnsVersion + name,
+							},
+						},
+					},
+				},
+			},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("error creating deployment: %v", err)
+		}
+	}
+
+	createDeployment("")
+	if multiDNS {
+		createDeployment("dns2")
+	}
+	return client
 }

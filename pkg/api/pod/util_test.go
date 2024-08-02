@@ -23,6 +23,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -663,7 +665,7 @@ func TestDropProcMount(t *testing.T) {
 				}
 
 				t.Run(fmt.Sprintf("feature enabled=%v, old pod %v, new pod %v", enabled, oldPodInfo.description, newPodInfo.description), func(t *testing.T) {
-					defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ProcMountType, enabled)()
+					featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ProcMountType, enabled)
 
 					var oldPodSpec *api.PodSpec
 					if oldPod != nil {
@@ -704,84 +706,99 @@ func TestDropProcMount(t *testing.T) {
 }
 
 func TestDropAppArmor(t *testing.T) {
-	podWithAppArmor := func() *api.Pod {
-		return &api.Pod{
-			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"a": "1", v1.AppArmorBetaContainerAnnotationKeyPrefix + "foo": "default"}},
+	tests := []struct {
+		description    string
+		hasAnnotations bool
+		hasFields      bool
+		pod            api.Pod
+	}{{
+		description:    "with AppArmor Annotations",
+		hasAnnotations: true,
+		pod: api.Pod{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"a": "1", v1.DeprecatedAppArmorBetaContainerAnnotationKeyPrefix + "foo": "default"}},
 			Spec:       api.PodSpec{},
-		}
-	}
-	podWithoutAppArmor := func() *api.Pod {
-		return &api.Pod{
+		},
+	}, {
+		description:    "with AppArmor Annotations & fields",
+		hasAnnotations: true,
+		hasFields:      true,
+		pod: api.Pod{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"a": "1", v1.DeprecatedAppArmorBetaContainerAnnotationKeyPrefix + "foo": "default"}},
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{
+					AppArmorProfile: &api.AppArmorProfile{
+						Type: api.AppArmorProfileTypeRuntimeDefault,
+					},
+				},
+			},
+		},
+	}, {
+		description: "with pod AppArmor profile",
+		hasFields:   true,
+		pod: api.Pod{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"a": "1"}},
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{
+					AppArmorProfile: &api.AppArmorProfile{
+						Type: api.AppArmorProfileTypeRuntimeDefault,
+					},
+				},
+			},
+		},
+	}, {
+		description: "with container AppArmor profile",
+		hasFields:   true,
+		pod: api.Pod{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"a": "1"}},
+			Spec: api.PodSpec{
+				Containers: []api.Container{{
+					SecurityContext: &api.SecurityContext{
+						AppArmorProfile: &api.AppArmorProfile{
+							Type: api.AppArmorProfileTypeRuntimeDefault,
+						},
+					},
+				}},
+			},
+		},
+	}, {
+		description: "without AppArmor",
+		pod: api.Pod{
 			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"a": "1"}},
 			Spec:       api.PodSpec{},
-		}
-	}
-
-	podInfo := []struct {
-		description string
-		hasAppArmor bool
-		pod         func() *api.Pod
-	}{
-		{
-			description: "has AppArmor",
-			hasAppArmor: true,
-			pod:         podWithAppArmor,
 		},
-		{
-			description: "does not have AppArmor",
-			hasAppArmor: false,
-			pod:         podWithoutAppArmor,
-		},
-		{
-			description: "is nil",
-			hasAppArmor: false,
-			pod:         func() *api.Pod { return nil },
-		},
-	}
+	}}
 
-	for _, enabled := range []bool{true, false} {
-		for _, oldPodInfo := range podInfo {
-			for _, newPodInfo := range podInfo {
-				oldPodHasAppArmor, oldPod := oldPodInfo.hasAppArmor, oldPodInfo.pod()
-				newPodHasAppArmor, newPod := newPodInfo.hasAppArmor, newPodInfo.pod()
-				if newPod == nil {
-					continue
-				}
+	for _, test := range tests {
 
-				t.Run(fmt.Sprintf("feature enabled=%v, old pod %v, new pod %v", enabled, oldPodInfo.description, newPodInfo.description), func(t *testing.T) {
-					defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.AppArmor, enabled)()
+		t.Run(fmt.Sprintf("%v", test.description), func(t *testing.T) {
+			newPod := test.pod.DeepCopy()
 
-					DropDisabledPodFields(newPod, oldPod)
-
-					// old pod should never be changed
-					if !reflect.DeepEqual(oldPod, oldPodInfo.pod()) {
-						t.Errorf("old pod changed: %v", cmp.Diff(oldPod, oldPodInfo.pod()))
-					}
-
-					switch {
-					case enabled || oldPodHasAppArmor:
-						// new pod should not be changed if the feature is enabled, or if the old pod had AppArmor
-						if !reflect.DeepEqual(newPod, newPodInfo.pod()) {
-							t.Errorf("new pod changed: %v", cmp.Diff(newPod, newPodInfo.pod()))
-						}
-					case newPodHasAppArmor:
-						// new pod should be changed
-						if reflect.DeepEqual(newPod, newPodInfo.pod()) {
-							t.Errorf("new pod was not changed")
-						}
-						// new pod should not have AppArmor
-						if !reflect.DeepEqual(newPod, podWithoutAppArmor()) {
-							t.Errorf("new pod had EmptyDir SizeLimit: %v", cmp.Diff(newPod, podWithoutAppArmor()))
-						}
-					default:
-						// new pod should not need to be changed
-						if !reflect.DeepEqual(newPod, newPodInfo.pod()) {
-							t.Errorf("new pod changed: %v", cmp.Diff(newPod, newPodInfo.pod()))
-						}
-					}
-				})
+			if hasAnnotations := appArmorAnnotationsInUse(newPod.Annotations); hasAnnotations != test.hasAnnotations {
+				t.Errorf("appArmorAnnotationsInUse does not match expectation: %t != %t", hasAnnotations, test.hasAnnotations)
 			}
-		}
+			if hasFields := appArmorFieldsInUse(&newPod.Spec); hasFields != test.hasFields {
+				t.Errorf("appArmorFieldsInUse does not match expectation: %t != %t", hasFields, test.hasFields)
+			}
+
+			DropDisabledPodFields(newPod, newPod)
+			require.Equal(t, &test.pod, newPod, "unchanged pod should never be mutated")
+
+			DropDisabledPodFields(newPod, nil)
+			assert.Equal(t, &test.pod, newPod, "pod should not be mutated when both feature gates are enabled")
+
+			expectAnnotations := test.hasAnnotations
+			assert.Equal(t, expectAnnotations, appArmorAnnotationsInUse(newPod.Annotations), "AppArmor annotations expectation")
+			if expectAnnotations == test.hasAnnotations {
+				assert.Equal(t, test.pod.Annotations, newPod.Annotations, "annotations should not be mutated")
+			}
+
+			expectFields := test.hasFields
+			assert.Equal(t, expectFields, appArmorFieldsInUse(&newPod.Spec), "AppArmor fields expectation")
+			if expectFields == test.hasFields {
+				assert.Equal(t, &test.pod.Spec, &newPod.Spec, "PodSpec should not be mutated")
+			}
+		})
+
 	}
 }
 
@@ -815,10 +832,8 @@ func TestDropDynamicResourceAllocation(t *testing.T) {
 			},
 			ResourceClaims: []api.PodResourceClaim{
 				{
-					Name: "my-claim",
-					Source: api.ClaimSource{
-						ResourceClaimName: &resourceClaimName,
-					},
+					Name:              "my-claim",
+					ResourceClaimName: &resourceClaimName,
 				},
 			},
 		},
@@ -930,7 +945,7 @@ func TestDropDynamicResourceAllocation(t *testing.T) {
 
 	for _, tc := range testcases {
 		t.Run(tc.description, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DynamicResourceAllocation, tc.enabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DynamicResourceAllocation, tc.enabled)
 
 			oldPod := tc.oldPod.DeepCopy()
 			newPod := tc.newPod.DeepCopy()
@@ -988,178 +1003,11 @@ func TestValidatePodDeletionCostOption(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodDeletionCost, tc.featureEnabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodDeletionCost, tc.featureEnabled)
 			// The new pod doesn't impact the outcome.
 			gotOptions := GetValidationOptionsFromPodSpecAndMeta(nil, nil, nil, tc.oldPodMeta)
 			if tc.wantAllowInvalidPodDeletionCost != gotOptions.AllowInvalidPodDeletionCost {
 				t.Errorf("unexpected diff, want: %v, got: %v", tc.wantAllowInvalidPodDeletionCost, gotOptions.AllowInvalidPodDeletionCost)
-			}
-		})
-	}
-}
-
-func TestDropDisabledTopologySpreadConstraintsFields(t *testing.T) {
-	testCases := []struct {
-		name        string
-		enabled     bool
-		podSpec     *api.PodSpec
-		oldPodSpec  *api.PodSpec
-		wantPodSpec *api.PodSpec
-	}{
-		{
-			name:        "TopologySpreadConstraints is nil",
-			podSpec:     &api.PodSpec{},
-			oldPodSpec:  &api.PodSpec{},
-			wantPodSpec: &api.PodSpec{},
-		},
-		{
-			name:        "TopologySpreadConstraints is empty",
-			podSpec:     &api.PodSpec{TopologySpreadConstraints: []api.TopologySpreadConstraint{}},
-			oldPodSpec:  &api.PodSpec{TopologySpreadConstraints: []api.TopologySpreadConstraint{}},
-			wantPodSpec: &api.PodSpec{TopologySpreadConstraints: []api.TopologySpreadConstraint{}},
-		},
-		{
-			name: "TopologySpreadConstraints is not empty, but all constraints don't have minDomains",
-			podSpec: &api.PodSpec{TopologySpreadConstraints: []api.TopologySpreadConstraint{
-				{
-					MinDomains: nil,
-				},
-				{
-					MinDomains: nil,
-				},
-			}},
-			oldPodSpec: &api.PodSpec{TopologySpreadConstraints: []api.TopologySpreadConstraint{
-				{
-					MinDomains: nil,
-				},
-				{
-					MinDomains: nil,
-				},
-			}},
-			wantPodSpec: &api.PodSpec{TopologySpreadConstraints: []api.TopologySpreadConstraint{
-				{
-					MinDomains: nil,
-				},
-				{
-					MinDomains: nil,
-				},
-			}},
-		},
-		{
-			name: "one constraint in podSpec has non-empty minDomains, feature gate is disabled " +
-				"and all constraint in oldPodSpec doesn't have minDomains",
-			enabled: false,
-			podSpec: &api.PodSpec{
-				TopologySpreadConstraints: []api.TopologySpreadConstraint{
-					{
-						MinDomains: pointer.Int32(2),
-					},
-					{
-						MinDomains: nil,
-					},
-				},
-			},
-			oldPodSpec: &api.PodSpec{
-				TopologySpreadConstraints: []api.TopologySpreadConstraint{
-					{
-						MinDomains: nil,
-					},
-					{
-						MinDomains: nil,
-					},
-				},
-			},
-			wantPodSpec: &api.PodSpec{
-				TopologySpreadConstraints: []api.TopologySpreadConstraint{
-					{
-						// cleared.
-						MinDomains: nil,
-					},
-					{
-						MinDomains: nil,
-					},
-				},
-			},
-		},
-		{
-			name: "one constraint in podSpec has non-empty minDomains, feature gate is disabled " +
-				"and one constraint in oldPodSpec has minDomains",
-			enabled: false,
-			podSpec: &api.PodSpec{
-				TopologySpreadConstraints: []api.TopologySpreadConstraint{
-					{
-						MinDomains: pointer.Int32(2),
-					},
-					{
-						MinDomains: nil,
-					},
-				},
-			},
-			oldPodSpec: &api.PodSpec{
-				TopologySpreadConstraints: []api.TopologySpreadConstraint{
-					{
-						MinDomains: pointer.Int32(2),
-					},
-					{
-						MinDomains: nil,
-					},
-				},
-			},
-			wantPodSpec: &api.PodSpec{
-				TopologySpreadConstraints: []api.TopologySpreadConstraint{
-					{
-						// not cleared.
-						MinDomains: pointer.Int32(2),
-					},
-					{
-						MinDomains: nil,
-					},
-				},
-			},
-		},
-		{
-			name: "one constraint in podSpec has non-empty minDomains, feature gate is enabled" +
-				"and all constraint in oldPodSpec doesn't have minDomains",
-			enabled: true,
-			podSpec: &api.PodSpec{
-				TopologySpreadConstraints: []api.TopologySpreadConstraint{
-					{
-						MinDomains: pointer.Int32(2),
-					},
-					{
-						MinDomains: nil,
-					},
-				},
-			},
-			oldPodSpec: &api.PodSpec{
-				TopologySpreadConstraints: []api.TopologySpreadConstraint{
-					{
-						MinDomains: nil,
-					},
-					{
-						MinDomains: nil,
-					},
-				},
-			},
-			wantPodSpec: &api.PodSpec{
-				TopologySpreadConstraints: []api.TopologySpreadConstraint{
-					{
-						// not cleared.
-						MinDomains: pointer.Int32(2),
-					},
-					{
-						MinDomains: nil,
-					},
-				},
-			},
-		},
-	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.MinDomainsInPodTopologySpread, tc.enabled)()
-			dropDisabledFields(tc.podSpec, nil, tc.oldPodSpec, nil)
-			if diff := cmp.Diff(tc.wantPodSpec, tc.podSpec); diff != "" {
-				t.Errorf("unexpected pod spec (-want, +got):\n%s", diff)
 			}
 		})
 	}
@@ -1466,7 +1314,7 @@ func TestDropNodeInclusionPolicyFields(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeInclusionPolicyInPodTopologySpread, test.enabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeInclusionPolicyInPodTopologySpread, test.enabled)
 
 			dropDisabledFields(test.podSpec, nil, test.oldPodSpec, nil)
 			if diff := cmp.Diff(test.wantPodSpec, test.podSpec); diff != "" {
@@ -2321,7 +2169,7 @@ func Test_dropDisabledMatchLabelKeysFieldInPodAffinity(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.MatchLabelKeysInPodAffinity, test.enabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.MatchLabelKeysInPodAffinity, test.enabled)
 
 			dropDisabledFields(test.podSpec, nil, test.oldPodSpec, nil)
 			if diff := cmp.Diff(test.wantPodSpec, test.podSpec); diff != "" {
@@ -2456,7 +2304,7 @@ func Test_dropDisabledMatchLabelKeysFieldInTopologySpread(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.MatchLabelKeysInPodTopologySpread, test.enabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.MatchLabelKeysInPodTopologySpread, test.enabled)
 
 			dropDisabledFields(test.podSpec, nil, test.oldPodSpec, nil)
 			if diff := cmp.Diff(test.wantPodSpec, test.podSpec); diff != "" {
@@ -2526,7 +2374,7 @@ func TestDropHostUsers(t *testing.T) {
 				}
 
 				t.Run(fmt.Sprintf("feature enabled=%v, old pod %v, new pod %v", enabled, oldPodInfo.description, newPodInfo.description), func(t *testing.T) {
-					defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.UserNamespacesSupport, enabled)()
+					featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.UserNamespacesSupport, enabled)
 
 					DropDisabledPodFields(newPod, oldPod)
 
@@ -2561,88 +2409,6 @@ func TestDropHostUsers(t *testing.T) {
 		}
 	}
 
-}
-
-func TestDropSchedulingGates(t *testing.T) {
-	podWithSchedulingGates := func() *api.Pod {
-		return &api.Pod{
-			Spec: api.PodSpec{
-				SchedulingGates: []api.PodSchedulingGate{
-					{Name: "foo"},
-					{Name: "bar"},
-				},
-			},
-		}
-	}
-	podWithoutSchedulingGates := func() *api.Pod { return &api.Pod{} }
-
-	podInfo := []struct {
-		description             string
-		hasSchedulingGatesField bool
-		pod                     func() *api.Pod
-	}{
-		{
-			description:             "has SchedulingGates field",
-			hasSchedulingGatesField: true,
-			pod:                     podWithSchedulingGates,
-		},
-		{
-			description:             "does not have SchedulingGates field",
-			hasSchedulingGatesField: false,
-			pod:                     podWithoutSchedulingGates,
-		},
-		{
-			description:             "is nil",
-			hasSchedulingGatesField: false,
-			pod:                     func() *api.Pod { return nil },
-		},
-	}
-
-	for _, enabled := range []bool{true, false} {
-		for _, oldPodInfo := range podInfo {
-			for _, newPodInfo := range podInfo {
-				oldPodHasSchedulingGates, oldPod := oldPodInfo.hasSchedulingGatesField, oldPodInfo.pod()
-				newPodHasSchedulingGates, newPod := newPodInfo.hasSchedulingGatesField, newPodInfo.pod()
-				if newPod == nil {
-					continue
-				}
-
-				t.Run(fmt.Sprintf("feature enabled=%v, old pod %v, new pod %v", enabled, oldPodInfo.description, newPodInfo.description), func(t *testing.T) {
-					defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodSchedulingReadiness, enabled)()
-					var oldPodSpec *api.PodSpec
-					if oldPod != nil {
-						oldPodSpec = &oldPod.Spec
-					}
-					dropDisabledFields(&newPod.Spec, nil, oldPodSpec, nil)
-					// Old Pod should never be changed.
-					if diff := cmp.Diff(oldPod, oldPodInfo.pod()); diff != "" {
-						t.Errorf("old pod changed: %v", diff)
-					}
-					switch {
-					case enabled || oldPodHasSchedulingGates:
-						// New Pod should not be changed if the feature is enabled, or if the old Pod had schedulingGates.
-						if diff := cmp.Diff(newPod, newPodInfo.pod()); diff != "" {
-							t.Errorf("new pod changed: %v", diff)
-						}
-					case newPodHasSchedulingGates:
-						// New Pod should be changed.
-						if reflect.DeepEqual(newPod, newPodInfo.pod()) {
-							t.Errorf("new pod was not changed")
-						}
-						// New Pod should not have SchedulingGates field.
-						if diff := cmp.Diff(newPod, podWithoutSchedulingGates()); diff != "" {
-							t.Errorf("new pod has SchedulingGates field: %v", diff)
-						}
-					default:
-						// New pod should not need to be changed.
-						if diff := cmp.Diff(newPod, newPodInfo.pod()); diff != "" {
-							t.Errorf("new pod changed: %v", diff)
-						}
-					}
-				})
-			}
-		}
-	}
 }
 
 func TestValidateTopologySpreadConstraintLabelSelectorOption(t *testing.T) {
@@ -2879,7 +2645,7 @@ func TestDropInPlacePodVerticalScaling(t *testing.T) {
 				}
 
 				t.Run(fmt.Sprintf("feature enabled=%v, old pod %v, new pod %v", enabled, oldPodInfo.description, newPodInfo.description), func(t *testing.T) {
-					defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.InPlacePodVerticalScaling, enabled)()
+					featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.InPlacePodVerticalScaling, enabled)
 
 					var oldPodSpec *api.PodSpec
 					var oldPodStatus *api.PodStatus
@@ -2984,7 +2750,7 @@ func TestDropSidecarContainers(t *testing.T) {
 				}
 
 				t.Run(fmt.Sprintf("feature enabled=%v, old pod %v, new pod %v", enabled, oldPodInfo.description, newPodInfo.description), func(t *testing.T) {
-					defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SidecarContainers, enabled)()
+					featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SidecarContainers, enabled)
 
 					var oldPodSpec *api.PodSpec
 					if oldPod != nil {
@@ -3424,7 +3190,7 @@ func TestDropClusterTrustBundleProjectedVolumes(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ClusterTrustBundleProjection, tc.clusterTrustBundleProjectionEnabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ClusterTrustBundleProjection, tc.clusterTrustBundleProjectionEnabled)
 
 			dropDisabledClusterTrustBundleProjection(tc.newPod, tc.oldPod)
 			if diff := cmp.Diff(tc.newPod, tc.wantPod); diff != "" {
@@ -3599,7 +3365,7 @@ func TestDropPodLifecycleSleepAction(t *testing.T) {
 
 	for i, tc := range testCases {
 		t.Run(fmt.Sprintf("test_%d", i), func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodLifecycleSleepAction, tc.gateEnabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodLifecycleSleepAction, tc.gateEnabled)
 
 			// preStop
 			// container
@@ -3662,6 +3428,292 @@ func TestDropPodLifecycleSleepAction(t *testing.T) {
 				if diff := cmp.Diff(expectPod, newPod); diff != "" {
 					t.Fatalf("Unexpected modification to new pod; diff (-got +want)\n%s", diff)
 				}
+			}
+		})
+	}
+}
+
+func TestDropSupplementalGroupsPolicy(t *testing.T) {
+	supplementalGroupsPolicyMerge := api.SupplementalGroupsPolicyMerge
+	podWithSupplementalGroupsPolicy := func() *api.Pod {
+		return &api.Pod{
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{
+					SupplementalGroupsPolicy: &supplementalGroupsPolicyMerge,
+				},
+				Containers: []api.Container{
+					{
+						Name:  "c1",
+						Image: "image",
+					},
+				},
+			},
+			Status: api.PodStatus{
+				ContainerStatuses: []api.ContainerStatus{
+					{
+						Name:  "c1",
+						Image: "image",
+						User: &api.ContainerUser{
+							Linux: &api.LinuxContainerUser{
+								UID:                0,
+								GID:                0,
+								SupplementalGroups: []int64{0, 1000},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+	podWithoutSupplementalGroupsPolicy := func() *api.Pod {
+		return &api.Pod{
+			Spec: api.PodSpec{
+				SecurityContext: &api.PodSecurityContext{},
+				Containers: []api.Container{
+					{
+						Name:  "c1",
+						Image: "image",
+					},
+				},
+			},
+			Status: api.PodStatus{
+				ContainerStatuses: []api.ContainerStatus{
+					{
+						Name:  "c1",
+						Image: "image",
+					},
+				},
+			},
+		}
+	}
+
+	podInfo := []struct {
+		description                 string
+		hasSupplementalGroupsPolicy bool
+		pod                         func() *api.Pod
+	}{
+		{
+			description:                 "with SupplementalGroupsPolicy and User",
+			hasSupplementalGroupsPolicy: true,
+			pod:                         podWithSupplementalGroupsPolicy,
+		},
+		{
+			description:                 "without SupplementalGroupsPolicy and User",
+			hasSupplementalGroupsPolicy: false,
+			pod:                         podWithoutSupplementalGroupsPolicy,
+		},
+		{
+			description:                 "is nil",
+			hasSupplementalGroupsPolicy: false,
+			pod:                         func() *api.Pod { return nil },
+		},
+	}
+
+	for _, enabled := range []bool{true, false} {
+		for _, oldPodInfo := range podInfo {
+			for _, newPodInfo := range podInfo {
+				oldPodHasSupplementalGroupsPolicy, oldPod := oldPodInfo.hasSupplementalGroupsPolicy, oldPodInfo.pod()
+				newPodHasSupplementalGroupsPolicy, newPod := newPodInfo.hasSupplementalGroupsPolicy, newPodInfo.pod()
+				if newPod == nil {
+					continue
+				}
+
+				t.Run(
+					fmt.Sprintf(
+						"feature enabled=%v, old pod %v, new pod %v", enabled, oldPodInfo.description, newPodInfo.description,
+					),
+					func(t *testing.T) {
+						featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SupplementalGroupsPolicy, enabled)
+
+						var oldPodSpec *api.PodSpec
+						var oldPodStatus *api.PodStatus
+						if oldPod != nil {
+							oldPodSpec = &oldPod.Spec
+							oldPodStatus = &oldPod.Status
+						}
+						dropDisabledFields(&newPod.Spec, nil, oldPodSpec, nil)
+						dropDisabledPodStatusFields(&newPod.Status, oldPodStatus, &newPod.Spec, oldPodSpec)
+
+						// old pod should never be changed
+						if !reflect.DeepEqual(oldPod, oldPodInfo.pod()) {
+							t.Errorf("old pod changed: %v", cmp.Diff(oldPod, oldPodInfo.pod()))
+						}
+						switch {
+						case enabled || oldPodHasSupplementalGroupsPolicy:
+							// new pod shouldn't change if feature enabled or if old pod has SupplementalGroupsPolicy and User set
+							if !reflect.DeepEqual(newPod, newPodInfo.pod()) {
+								t.Errorf("new pod changed: %v", cmp.Diff(newPod, newPodInfo.pod()))
+							}
+						case newPodHasSupplementalGroupsPolicy:
+							// new pod should be changed
+							if reflect.DeepEqual(newPod, newPodInfo.pod()) {
+								t.Errorf("new pod was not changed")
+							}
+							// new pod should not have SupplementalGroupsPolicy and User fields
+							if !reflect.DeepEqual(newPod, podWithoutSupplementalGroupsPolicy()) {
+								t.Errorf("new pod has SupplementalGroups and User: %v", cmp.Diff(newPod, podWithoutSupplementalGroupsPolicy()))
+							}
+						default:
+							// new pod should not need to be changed
+							if !reflect.DeepEqual(newPod, newPodInfo.pod()) {
+								t.Errorf("new pod changed: %v", cmp.Diff(newPod, newPodInfo.pod()))
+							}
+						}
+					},
+				)
+			}
+		}
+	}
+}
+
+func TestDropImageVolumes(t *testing.T) {
+	const (
+		volumeNameImage = "volume"
+		volumeNameOther = "volume-other"
+	)
+	anotherVolume := api.Volume{Name: volumeNameOther, VolumeSource: api.VolumeSource{HostPath: &api.HostPathVolumeSource{}}}
+	podWithVolume := &api.Pod{
+		Spec: api.PodSpec{
+			Volumes: []api.Volume{
+				{Name: volumeNameImage, VolumeSource: api.VolumeSource{Image: &api.ImageVolumeSource{}}},
+				anotherVolume,
+			},
+			Containers: []api.Container{{
+				VolumeMounts: []api.VolumeMount{{Name: volumeNameImage}, {Name: volumeNameOther}},
+			}},
+			InitContainers: []api.Container{{
+				VolumeMounts: []api.VolumeMount{{Name: volumeNameImage}},
+			}},
+			EphemeralContainers: []api.EphemeralContainer{
+				{EphemeralContainerCommon: api.EphemeralContainerCommon{
+					VolumeMounts: []api.VolumeMount{{Name: volumeNameImage}},
+				}},
+			},
+		},
+	}
+
+	podWithoutVolume := &api.Pod{
+		Spec: api.PodSpec{
+			Volumes:             []api.Volume{anotherVolume},
+			Containers:          []api.Container{{VolumeMounts: []api.VolumeMount{{Name: volumeNameOther}}}},
+			InitContainers:      []api.Container{{}},
+			EphemeralContainers: []api.EphemeralContainer{{}},
+		},
+	}
+
+	noPod := &api.Pod{}
+
+	testcases := []struct {
+		description string
+		enabled     bool
+		oldPod      *api.Pod
+		newPod      *api.Pod
+		wantPod     *api.Pod
+	}{
+		{
+			description: "old with volume / new with volume / disabled",
+			oldPod:      podWithVolume,
+			newPod:      podWithVolume,
+			wantPod:     podWithVolume,
+		},
+		{
+			description: "old without volume / new with volume / disabled",
+			oldPod:      podWithoutVolume,
+			newPod:      podWithVolume,
+			wantPod:     podWithoutVolume,
+		},
+		{
+			description: "no old pod/ new with volume / disabled",
+			oldPod:      noPod,
+			newPod:      podWithVolume,
+			wantPod:     podWithoutVolume,
+		},
+		{
+			description: "nil old pod/ new with volume / disabled",
+			oldPod:      nil,
+			newPod:      podWithVolume,
+			wantPod:     podWithoutVolume,
+		},
+		{
+			description: "old with volume / new without volume / disabled",
+			oldPod:      podWithVolume,
+			newPod:      podWithoutVolume,
+			wantPod:     podWithoutVolume,
+		},
+		{
+			description: "old without volume / new without volume / disabled",
+			oldPod:      podWithoutVolume,
+			newPod:      podWithoutVolume,
+			wantPod:     podWithoutVolume,
+		},
+		{
+			description: "no old pod/ new without volume / disabled",
+			oldPod:      noPod,
+			newPod:      podWithoutVolume,
+			wantPod:     podWithoutVolume,
+		},
+
+		{
+			description: "old with volume / new with volume / enabled",
+			enabled:     true,
+			oldPod:      podWithVolume,
+			newPod:      podWithVolume,
+			wantPod:     podWithVolume,
+		},
+		{
+			description: "old without volume / new with volume / enabled",
+			enabled:     true,
+			oldPod:      podWithoutVolume,
+			newPod:      podWithVolume,
+			wantPod:     podWithVolume,
+		},
+		{
+			description: "no old pod/ new with volume / enabled",
+			enabled:     true,
+			oldPod:      noPod,
+			newPod:      podWithVolume,
+			wantPod:     podWithVolume,
+		},
+
+		{
+			description: "old with volume / new without volume / enabled",
+			enabled:     true,
+			oldPod:      podWithVolume,
+			newPod:      podWithoutVolume,
+			wantPod:     podWithoutVolume,
+		},
+		{
+			description: "old without volume / new without volume / enabled",
+			enabled:     true,
+			oldPod:      podWithoutVolume,
+			newPod:      podWithoutVolume,
+			wantPod:     podWithoutVolume,
+		},
+		{
+			description: "no old pod/ new without volume / enabled",
+			enabled:     true,
+			oldPod:      noPod,
+			newPod:      podWithoutVolume,
+			wantPod:     podWithoutVolume,
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.description, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ImageVolume, tc.enabled)
+
+			oldPod := tc.oldPod.DeepCopy()
+			newPod := tc.newPod.DeepCopy()
+			wantPod := tc.wantPod
+			DropDisabledPodFields(newPod, oldPod)
+
+			// old pod should never be changed
+			if diff := cmp.Diff(oldPod, tc.oldPod); diff != "" {
+				t.Errorf("old pod changed: %s", diff)
+			}
+
+			if diff := cmp.Diff(wantPod, newPod); diff != "" {
+				t.Errorf("new pod changed (- want, + got): %s", diff)
 			}
 		})
 	}

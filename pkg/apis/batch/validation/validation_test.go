@@ -17,6 +17,7 @@ limitations under the License.
 package validation
 
 import (
+	"errors"
 	_ "time/tzdata"
 
 	"fmt"
@@ -29,10 +30,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	podtest "k8s.io/kubernetes/pkg/api/pod/testing"
 	"k8s.io/kubernetes/pkg/apis/batch"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	corevalidation "k8s.io/kubernetes/pkg/apis/core/validation"
 	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 var (
@@ -59,11 +62,7 @@ func getValidPodTemplateSpecForManual(selector *metav1.LabelSelector) api.PodTem
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: selector.MatchLabels,
 		},
-		Spec: api.PodSpec{
-			RestartPolicy: api.RestartPolicyOnFailure,
-			DNSPolicy:     api.DNSClusterFirst,
-			Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-		},
+		Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure)),
 	}
 }
 
@@ -78,12 +77,8 @@ func getValidPodTemplateSpecForGenerated(selector *metav1.LabelSelector) api.Pod
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: selector.MatchLabels,
 		},
-		Spec: api.PodSpec{
-			RestartPolicy:  api.RestartPolicyOnFailure,
-			DNSPolicy:      api.DNSClusterFirst,
-			Containers:     []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-			InitContainers: []api.Container{{Name: "def", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-		},
+		Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure),
+			podtest.SetInitContainers(podtest.MakeContainer("def"))),
 	}
 }
 
@@ -117,6 +112,29 @@ func TestValidateJob(t *testing.T) {
 		opts JobValidationOptions
 		job  batch.Job
 	}{
+		"valid success policy": {
+			opts: JobValidationOptions{RequirePrefixedLabels: true},
+			job: batch.Job{
+				ObjectMeta: validJobObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       validGeneratedSelector,
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					Template:       validPodTemplateSpecForGeneratedRestartPolicyNever,
+					SuccessPolicy: &batch.SuccessPolicy{
+						Rules: []batch.SuccessPolicyRule{
+							{
+								SucceededCount:   ptr.To[int32](1),
+								SucceededIndexes: ptr.To("0,2,4"),
+							},
+							{
+								SucceededIndexes: ptr.To("1,3,5-9"),
+							},
+						},
+					},
+				},
+			},
+		},
 		"valid pod failure policy": {
 			opts: JobValidationOptions{RequirePrefixedLabels: true},
 			job: batch.Job{
@@ -140,7 +158,7 @@ func TestValidateJob(t *testing.T) {
 						}, {
 							Action: batch.PodFailurePolicyActionCount,
 							OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
-								ContainerName: pointer.String("abc"),
+								ContainerName: pointer.String("ctr"),
 								Operator:      batch.PodFailurePolicyOnExitCodesOpIn,
 								Values:        []int32{1, 2, 3},
 							},
@@ -370,13 +388,19 @@ func TestValidateJob(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: map[string]string{batch.LegacyControllerUidLabel: "1a2b3c", batch.LegacyJobNameLabel: "myjob"},
 						},
-						Spec: api.PodSpec{
-							RestartPolicy:  api.RestartPolicyOnFailure,
-							DNSPolicy:      api.DNSClusterFirst,
-							Containers:     []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-							InitContainers: []api.Container{{Name: "def", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-						},
+						Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure)),
 					},
+				},
+			},
+		},
+		"valid managedBy field": {
+			opts: JobValidationOptions{RequirePrefixedLabels: true},
+			job: batch.Job{
+				ObjectMeta: validJobObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:  validGeneratedSelector,
+					Template:  validPodTemplateSpecForGenerated,
+					ManagedBy: ptr.To("example.com/foo"),
 				},
 			},
 		},
@@ -394,6 +418,181 @@ func TestValidateJob(t *testing.T) {
 		opts JobValidationOptions
 		job  batch.Job
 	}{
+		`spec.managedBy: Too long: may not be longer than 63`: {
+			opts: JobValidationOptions{RequirePrefixedLabels: true},
+			job: batch.Job{
+				ObjectMeta: validJobObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:  validGeneratedSelector,
+					Template:  validPodTemplateSpecForGenerated,
+					ManagedBy: ptr.To("example.com/" + strings.Repeat("x", 60)),
+				},
+			},
+		},
+		`spec.managedBy: Invalid value: "invalid custom controller name": must be a domain-prefixed path (such as "acme.io/foo")`: {
+			opts: JobValidationOptions{RequirePrefixedLabels: true},
+			job: batch.Job{
+				ObjectMeta: validJobObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:  validGeneratedSelector,
+					Template:  validPodTemplateSpecForGenerated,
+					ManagedBy: ptr.To("invalid custom controller name"),
+				},
+			},
+		},
+		`spec.successPolicy: Invalid value: batch.SuccessPolicy{Rules:[]batch.SuccessPolicyRule{}}: requires indexed completion mode`: {
+			job: batch.Job{
+				ObjectMeta: validJobObjectMeta,
+				Spec: batch.JobSpec{
+					Selector: validGeneratedSelector,
+					Template: validPodTemplateSpecForGeneratedRestartPolicyNever,
+					SuccessPolicy: &batch.SuccessPolicy{
+						Rules: []batch.SuccessPolicyRule{},
+					},
+				},
+			},
+			opts: JobValidationOptions{RequirePrefixedLabels: true},
+		},
+		`spec.successPolicy.rules: Required value: at least one rules must be specified when the successPolicy is specified`: {
+			job: batch.Job{
+				ObjectMeta: validJobObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       validGeneratedSelector,
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](5),
+					Template:       validPodTemplateSpecForGeneratedRestartPolicyNever,
+					SuccessPolicy:  &batch.SuccessPolicy{},
+				},
+			},
+			opts: JobValidationOptions{RequirePrefixedLabels: true},
+		},
+		`spec.successPolicy.rules[0]: Required value: at least one of succeededCount or succeededIndexes must be specified`: {
+			job: batch.Job{
+				ObjectMeta: validJobObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       validGeneratedSelector,
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](5),
+					Template:       validPodTemplateSpecForGeneratedRestartPolicyNever,
+					SuccessPolicy: &batch.SuccessPolicy{
+						Rules: []batch.SuccessPolicyRule{{
+							SucceededCount:   nil,
+							SucceededIndexes: nil,
+						}},
+					},
+				},
+			},
+			opts: JobValidationOptions{RequirePrefixedLabels: true},
+		},
+		`spec.successPolicy.rules[0].succeededIndexes: Invalid value: "invalid-format": error parsing succeededIndexes: cannot convert string to integer for index: "invalid"`: {
+			job: batch.Job{
+				ObjectMeta: validJobObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       validGeneratedSelector,
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](5),
+					Template:       validPodTemplateSpecForGeneratedRestartPolicyNever,
+					SuccessPolicy: &batch.SuccessPolicy{
+						Rules: []batch.SuccessPolicyRule{{
+							SucceededIndexes: ptr.To("invalid-format"),
+						}},
+					},
+				},
+			},
+			opts: JobValidationOptions{RequirePrefixedLabels: true},
+		},
+		`spec.successPolicy.rules[0].succeededIndexes: Too long: must have at most 65536 bytes`: {
+			job: batch.Job{
+				ObjectMeta: validJobObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       validGeneratedSelector,
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](5),
+					Template:       validPodTemplateSpecForGeneratedRestartPolicyNever,
+					SuccessPolicy: &batch.SuccessPolicy{
+						Rules: []batch.SuccessPolicyRule{{
+							SucceededIndexes: ptr.To(strings.Repeat("1", maxJobSuccessPolicySucceededIndexesLimit+1)),
+						}},
+					},
+				},
+			},
+			opts: JobValidationOptions{RequirePrefixedLabels: true},
+		},
+		`spec.successPolicy.rules[0].succeededCount: must be greater than or equal to 0`: {
+			job: batch.Job{
+				ObjectMeta: validJobObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       validGeneratedSelector,
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](5),
+					Template:       validPodTemplateSpecForGeneratedRestartPolicyNever,
+					SuccessPolicy: &batch.SuccessPolicy{
+						Rules: []batch.SuccessPolicyRule{{
+							SucceededCount: ptr.To[int32](-1),
+						}},
+					},
+				},
+			},
+			opts: JobValidationOptions{RequirePrefixedLabels: true},
+		},
+		`spec.successPolicy.rules[0].succeededCount: Invalid value: 6: must be less than or equal to 5 (the number of specified completions)`: {
+			job: batch.Job{
+				ObjectMeta: validJobObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       validGeneratedSelector,
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](5),
+					Template:       validPodTemplateSpecForGeneratedRestartPolicyNever,
+					SuccessPolicy: &batch.SuccessPolicy{
+						Rules: []batch.SuccessPolicyRule{{
+							SucceededCount: ptr.To[int32](6),
+						}},
+					},
+				},
+			},
+			opts: JobValidationOptions{RequirePrefixedLabels: true},
+		},
+		`spec.successPolicy.rules[0].succeededCount: Invalid value: 4: must be less than or equal to 3 (the number of indexes in the specified succeededIndexes field)`: {
+			job: batch.Job{
+				ObjectMeta: validJobObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       validGeneratedSelector,
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](5),
+					Template:       validPodTemplateSpecForGeneratedRestartPolicyNever,
+					SuccessPolicy: &batch.SuccessPolicy{
+						Rules: []batch.SuccessPolicyRule{{
+							SucceededCount:   ptr.To[int32](4),
+							SucceededIndexes: ptr.To("0-2"),
+						}},
+					},
+				},
+			},
+			opts: JobValidationOptions{RequirePrefixedLabels: true},
+		},
+		`spec.successPolicy.rules: Too many: 21: must have at most 20 items`: {
+			job: batch.Job{
+				ObjectMeta: validJobObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       validGeneratedSelector,
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](5),
+					Template:       validPodTemplateSpecForGeneratedRestartPolicyNever,
+					SuccessPolicy: &batch.SuccessPolicy{
+						Rules: func() []batch.SuccessPolicyRule {
+							var rules []batch.SuccessPolicyRule
+							for i := 0; i < 21; i++ {
+								rules = append(rules, batch.SuccessPolicyRule{
+									SucceededCount: ptr.To[int32](5),
+								})
+							}
+							return rules
+						}(),
+					},
+				},
+			},
+			opts: JobValidationOptions{RequirePrefixedLabels: true},
+		},
 		`spec.podFailurePolicy.rules[0]: Invalid value: specifying one of OnExitCodes and OnPodConditions is required`: {
 			job: batch.Job{
 				ObjectMeta: validJobObjectMeta,
@@ -608,7 +807,7 @@ func TestValidateJob(t *testing.T) {
 						Rules: []batch.PodFailurePolicyRule{{
 							Action: batch.PodFailurePolicyActionFailJob,
 							OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
-								ContainerName: pointer.String("abc"),
+								ContainerName: pointer.String("ctr"),
 								Operator:      batch.PodFailurePolicyOnExitCodesOpIn,
 								Values:        []int32{1, 2, 3},
 							},
@@ -651,7 +850,7 @@ func TestValidateJob(t *testing.T) {
 						Rules: []batch.PodFailurePolicyRule{{
 							Action: batch.PodFailurePolicyActionIgnore,
 							OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
-								ContainerName: pointer.String("abc"),
+								ContainerName: pointer.String("ctr"),
 								Operator:      batch.PodFailurePolicyOnExitCodesOpIn,
 								Values:        []int32{1, 2, 3},
 							},
@@ -678,7 +877,7 @@ func TestValidateJob(t *testing.T) {
 						Rules: []batch.PodFailurePolicyRule{{
 							Action: "UnknownAction",
 							OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
-								ContainerName: pointer.String("abc"),
+								ContainerName: pointer.String("ctr"),
 								Operator:      batch.PodFailurePolicyOnExitCodesOpIn,
 								Values:        []int32{1, 2, 3},
 							},
@@ -822,11 +1021,7 @@ func TestValidateJob(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: validGeneratedSelector.MatchLabels,
 						},
-						Spec: api.PodSpec{
-							RestartPolicy: api.RestartPolicyOnFailure,
-							DNSPolicy:     api.DNSClusterFirst,
-							Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-						},
+						Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure)),
 					},
 					PodFailurePolicy: &batch.PodFailurePolicy{
 						Rules: []batch.PodFailurePolicyRule{},
@@ -1040,11 +1235,7 @@ func TestValidateJob(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: map[string]string{"y": "z"},
 						},
-						Spec: api.PodSpec{
-							RestartPolicy: api.RestartPolicyOnFailure,
-							DNSPolicy:     api.DNSClusterFirst,
-							Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-						},
+						Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure)),
 					},
 				},
 			},
@@ -1064,11 +1255,7 @@ func TestValidateJob(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: map[string]string{"controller-uid": "4d5e6f"},
 						},
-						Spec: api.PodSpec{
-							RestartPolicy: api.RestartPolicyOnFailure,
-							DNSPolicy:     api.DNSClusterFirst,
-							Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-						},
+						Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure)),
 					},
 				},
 			},
@@ -1088,11 +1275,7 @@ func TestValidateJob(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: validManualSelector.MatchLabels,
 						},
-						Spec: api.PodSpec{
-							RestartPolicy: api.RestartPolicyAlways,
-							DNSPolicy:     api.DNSClusterFirst,
-							Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-						},
+						Spec: podtest.MakePodSpec(),
 					},
 				},
 			},
@@ -1112,11 +1295,7 @@ func TestValidateJob(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: validManualSelector.MatchLabels,
 						},
-						Spec: api.PodSpec{
-							RestartPolicy: "Invalid",
-							DNSPolicy:     api.DNSClusterFirst,
-							Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-						},
+						Spec: podtest.MakePodSpec(podtest.SetRestartPolicy("Invalid")),
 					},
 				},
 			},
@@ -1184,12 +1363,7 @@ func TestValidateJob(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: map[string]string{batch.LegacyJobNameLabel: "myjob"},
 						},
-						Spec: api.PodSpec{
-							RestartPolicy:  api.RestartPolicyOnFailure,
-							DNSPolicy:      api.DNSClusterFirst,
-							Containers:     []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-							InitContainers: []api.Container{{Name: "def", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-						},
+						Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure)),
 					},
 				},
 			},
@@ -1209,12 +1383,7 @@ func TestValidateJob(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: map[string]string{batch.LegacyJobNameLabel: "myjob"},
 						},
-						Spec: api.PodSpec{
-							RestartPolicy:  api.RestartPolicyOnFailure,
-							DNSPolicy:      api.DNSClusterFirst,
-							Containers:     []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-							InitContainers: []api.Container{{Name: "def", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-						},
+						Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure)),
 					},
 				},
 			},
@@ -1251,12 +1420,7 @@ func TestValidateJob(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: map[string]string{batch.JobNameLabel: "myjob", batch.LegacyControllerUidLabel: "1a2b3c", batch.LegacyJobNameLabel: "myjob"},
 						},
-						Spec: api.PodSpec{
-							RestartPolicy:  api.RestartPolicyOnFailure,
-							DNSPolicy:      api.DNSClusterFirst,
-							Containers:     []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-							InitContainers: []api.Container{{Name: "def", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-						},
+						Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure)),
 					},
 				},
 			},
@@ -1349,7 +1513,7 @@ func TestValidateJobUpdate(t *testing.T) {
 				job.Spec.ManualSelector = pointer.Bool(true)
 			},
 		},
-		"immutable completions for non-indexed jobs": {
+		"invalid attempt to set managedBy field": {
 			old: batch.Job{
 				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
 				Spec: batch.JobSpec{
@@ -1358,14 +1522,31 @@ func TestValidateJobUpdate(t *testing.T) {
 				},
 			},
 			update: func(job *batch.Job) {
-				job.Spec.Completions = pointer.Int32(1)
+				job.Spec.ManagedBy = ptr.To("example.com/custom-controller")
 			},
 			err: &field.Error{
 				Type:  field.ErrorTypeInvalid,
-				Field: "spec.completions",
+				Field: "spec.managedBy",
 			},
 		},
-		"immutable completions for indexed job when AllowElasticIndexedJobs is false": {
+		"invalid update of the managedBy field": {
+			old: batch.Job{
+				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
+				Spec: batch.JobSpec{
+					Selector:  validGeneratedSelector,
+					Template:  validPodTemplateSpecForGenerated,
+					ManagedBy: ptr.To("example.com/custom-controller1"),
+				},
+			},
+			update: func(job *batch.Job) {
+				job.Spec.ManagedBy = ptr.To("example.com/custom-controller2")
+			},
+			err: &field.Error{
+				Type:  field.ErrorTypeInvalid,
+				Field: "spec.managedBy",
+			},
+		},
+		"immutable completions for non-indexed jobs": {
 			old: batch.Job{
 				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
 				Spec: batch.JobSpec{
@@ -1397,6 +1578,76 @@ func TestValidateJobUpdate(t *testing.T) {
 				Field: "spec.selector",
 			},
 		},
+		"add success policy": {
+			old: batch.Job{
+				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](5),
+					Selector:       validGeneratedSelector,
+					Template:       validPodTemplateSpecForGeneratedRestartPolicyNever,
+				},
+			},
+			update: func(job *batch.Job) {
+				job.Spec.SuccessPolicy = &batch.SuccessPolicy{
+					Rules: []batch.SuccessPolicyRule{{
+						SucceededCount: ptr.To[int32](2),
+					}},
+				}
+			},
+			err: &field.Error{
+				Type:  field.ErrorTypeInvalid,
+				Field: "spec.successPolicy",
+			},
+		},
+		"update success policy": {
+			old: batch.Job{
+				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](5),
+					Selector:       validGeneratedSelector,
+					Template:       validPodTemplateSpecForGeneratedRestartPolicyNever,
+					SuccessPolicy: &batch.SuccessPolicy{
+						Rules: []batch.SuccessPolicyRule{{
+							SucceededIndexes: ptr.To("1-3"),
+						}},
+					},
+				},
+			},
+			update: func(job *batch.Job) {
+				job.Spec.SuccessPolicy.Rules = append(job.Spec.SuccessPolicy.Rules, batch.SuccessPolicyRule{
+					SucceededCount: ptr.To[int32](3),
+				})
+			},
+			err: &field.Error{
+				Type:  field.ErrorTypeInvalid,
+				Field: "spec.successPolicy",
+			},
+		},
+		"remove success policy": {
+			old: batch.Job{
+				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](5),
+					Selector:       validGeneratedSelector,
+					Template:       validPodTemplateSpecForGeneratedRestartPolicyNever,
+					SuccessPolicy: &batch.SuccessPolicy{
+						Rules: []batch.SuccessPolicyRule{{
+							SucceededIndexes: ptr.To("1-3"),
+						}},
+					},
+				},
+			},
+			update: func(job *batch.Job) {
+				job.Spec.SuccessPolicy = nil
+			},
+			err: &field.Error{
+				Type:  field.ErrorTypeInvalid,
+				Field: "spec.successPolicy",
+			},
+		},
 		"add pod failure policy": {
 			old: batch.Job{
 				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
@@ -1421,7 +1672,7 @@ func TestValidateJobUpdate(t *testing.T) {
 				Field: "spec.podFailurePolicy",
 			},
 		},
-		"remove pod failure policy": {
+		"update pod failure policy": {
 			old: batch.Job{
 				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
 				Spec: batch.JobSpec{
@@ -1452,7 +1703,7 @@ func TestValidateJobUpdate(t *testing.T) {
 				Field: "spec.podFailurePolicy",
 			},
 		},
-		"update pod failure policy": {
+		"remove pod failure policy": {
 			old: batch.Job{
 				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
 				Spec: batch.JobSpec{
@@ -1616,7 +1867,7 @@ func TestValidateJobUpdate(t *testing.T) {
 				Field: "spec.completionMode",
 			},
 		},
-		"immutable completions for non-indexed job when AllowElasticIndexedJobs is true": {
+		"immutable completions for non-indexed job": {
 			old: batch.Job{
 				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
 				Spec: batch.JobSpec{
@@ -1633,7 +1884,6 @@ func TestValidateJobUpdate(t *testing.T) {
 				Type:  field.ErrorTypeInvalid,
 				Field: "spec.completions",
 			},
-			opts: JobValidationOptions{AllowElasticIndexedJobs: true},
 		},
 
 		"immutable node affinity": {
@@ -1886,9 +2136,6 @@ func TestValidateJobUpdate(t *testing.T) {
 				job.Spec.Completions = pointer.Int32(2)
 				job.Spec.Parallelism = pointer.Int32(2)
 			},
-			opts: JobValidationOptions{
-				AllowElasticIndexedJobs: true,
-			},
 		},
 		"previous parallelism != previous completions, new parallelism == new completions": {
 			old: batch.Job{
@@ -1905,9 +2152,6 @@ func TestValidateJobUpdate(t *testing.T) {
 				job.Spec.Completions = pointer.Int32(3)
 				job.Spec.Parallelism = pointer.Int32(3)
 			},
-			opts: JobValidationOptions{
-				AllowElasticIndexedJobs: true,
-			},
 		},
 		"indexed job updating completions and parallelism to different values is invalid": {
 			old: batch.Job{
@@ -1923,9 +2167,6 @@ func TestValidateJobUpdate(t *testing.T) {
 			update: func(job *batch.Job) {
 				job.Spec.Completions = pointer.Int32(2)
 				job.Spec.Parallelism = pointer.Int32(3)
-			},
-			opts: JobValidationOptions{
-				AllowElasticIndexedJobs: true,
 			},
 			err: &field.Error{
 				Type:  field.ErrorTypeInvalid,
@@ -1947,9 +2188,6 @@ func TestValidateJobUpdate(t *testing.T) {
 				job.Spec.Completions = nil
 				job.Spec.Parallelism = pointer.Int32(3)
 			},
-			opts: JobValidationOptions{
-				AllowElasticIndexedJobs: true,
-			},
 			err: &field.Error{
 				Type:  field.ErrorTypeRequired,
 				Field: "spec.completions",
@@ -1970,9 +2208,6 @@ func TestValidateJobUpdate(t *testing.T) {
 				job.Spec.Completions = pointer.Int32(2)
 				job.Spec.Parallelism = pointer.Int32(1)
 			},
-			opts: JobValidationOptions{
-				AllowElasticIndexedJobs: true,
-			},
 		},
 		"indexed job with completions unchanged, parallelism increased higher than completions": {
 			old: batch.Job{
@@ -1988,9 +2223,6 @@ func TestValidateJobUpdate(t *testing.T) {
 			update: func(job *batch.Job) {
 				job.Spec.Completions = pointer.Int32(2)
 				job.Spec.Parallelism = pointer.Int32(3)
-			},
-			opts: JobValidationOptions{
-				AllowElasticIndexedJobs: true,
 			},
 		},
 	}
@@ -2014,6 +2246,8 @@ func TestValidateJobUpdate(t *testing.T) {
 
 func TestValidateJobUpdateStatus(t *testing.T) {
 	cases := map[string]struct {
+		opts JobStatusValidationOptions
+
 		old      batch.Job
 		update   batch.Job
 		wantErrs field.ErrorList
@@ -2141,7 +2375,7 @@ func TestValidateJobUpdateStatus(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			errs := ValidateJobUpdateStatus(&tc.update, &tc.old)
+			errs := ValidateJobUpdateStatus(&tc.update, &tc.old, tc.opts)
 			if diff := cmp.Diff(tc.wantErrs, errs, ignoreErrValueDetail); diff != "" {
 				t.Errorf("Unexpected errors (-want,+got):\n%s", diff)
 			}
@@ -2566,11 +2800,7 @@ func TestValidateCronJob(t *testing.T) {
 				JobTemplate: batch.JobTemplateSpec{
 					Spec: batch.JobSpec{
 						Template: api.PodTemplateSpec{
-							Spec: api.PodSpec{
-								RestartPolicy: api.RestartPolicyAlways,
-								DNSPolicy:     api.DNSClusterFirst,
-								Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-							},
+							Spec: podtest.MakePodSpec(),
 						},
 					},
 				},
@@ -2588,11 +2818,7 @@ func TestValidateCronJob(t *testing.T) {
 				JobTemplate: batch.JobTemplateSpec{
 					Spec: batch.JobSpec{
 						Template: api.PodTemplateSpec{
-							Spec: api.PodSpec{
-								RestartPolicy: "Invalid",
-								DNSPolicy:     api.DNSClusterFirst,
-								Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-							},
+							Spec: podtest.MakePodSpec(podtest.SetRestartPolicy("Invalid")),
 						},
 					},
 				},
@@ -3585,5 +3811,180 @@ func TestTimeZones(t *testing.T) {
 		if len(errs) > 0 {
 			t.Errorf("%s failed: %v", tz, errs)
 		}
+	}
+}
+
+func TestValidateIndexesString(t *testing.T) {
+	testCases := map[string]struct {
+		indexesString string
+		completions   int32
+		wantTotal     int32
+		wantError     error
+	}{
+		"empty is valid": {
+			indexesString: "",
+			completions:   6,
+			wantTotal:     0,
+		},
+		"single number is valid": {
+			indexesString: "1",
+			completions:   6,
+			wantTotal:     1,
+		},
+		"single interval is valid": {
+			indexesString: "1-3",
+			completions:   6,
+			wantTotal:     3,
+		},
+		"mixed intervals valid": {
+			indexesString: "0,1-3,5,7-10",
+			completions:   12,
+			wantTotal:     9,
+		},
+		"invalid due to extra space": {
+			indexesString: "0,1-3, 5",
+			completions:   6,
+			wantTotal:     0,
+			wantError:     errors.New(`cannot convert string to integer for index: " 5"`),
+		},
+		"invalid due to too large index": {
+			indexesString: "0,1-3,5",
+			completions:   5,
+			wantTotal:     0,
+			wantError:     errors.New(`too large index: "5"`),
+		},
+		"invalid due to non-increasing order of intervals": {
+			indexesString: "1-3,0,5",
+			completions:   6,
+			wantTotal:     0,
+			wantError:     errors.New(`non-increasing order, previous: 3, current: 0`),
+		},
+		"invalid due to non-increasing order between intervals": {
+			indexesString: "0,0,5",
+			completions:   6,
+			wantTotal:     0,
+			wantError:     errors.New(`non-increasing order, previous: 0, current: 0`),
+		},
+		"invalid due to non-increasing order within interval": {
+			indexesString: "0,1-1,5",
+			completions:   6,
+			wantTotal:     0,
+			wantError:     errors.New(`non-increasing order, previous: 1, current: 1`),
+		},
+		"invalid due to starting with '-'": {
+			indexesString: "-1,0",
+			completions:   6,
+			wantTotal:     0,
+			wantError:     errors.New(`cannot convert string to integer for index: ""`),
+		},
+		"invalid due to ending with '-'": {
+			indexesString: "0,1-",
+			completions:   6,
+			wantTotal:     0,
+			wantError:     errors.New(`cannot convert string to integer for index: ""`),
+		},
+		"invalid due to repeated '-'": {
+			indexesString: "0,1--3",
+			completions:   6,
+			wantTotal:     0,
+			wantError:     errors.New(`the fragment "1--3" violates the requirement that an index interval can have at most two parts separated by '-'`),
+		},
+		"invalid due to repeated ','": {
+			indexesString: "0,,1,3",
+			completions:   6,
+			wantTotal:     0,
+			wantError:     errors.New(`cannot convert string to integer for index: ""`),
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			gotTotal, gotErr := validateIndexesFormat(tc.indexesString, tc.completions)
+			if tc.wantError == nil && gotErr != nil {
+				t.Errorf("unexpected error: %s", gotErr)
+			} else if tc.wantError != nil && gotErr == nil {
+				t.Errorf("missing error: %s", tc.wantError)
+			} else if tc.wantError != nil && gotErr != nil {
+				if diff := cmp.Diff(tc.wantError.Error(), gotErr.Error()); diff != "" {
+					t.Errorf("unexpected error, diff: %s", diff)
+				}
+			}
+			if tc.wantTotal != gotTotal {
+				t.Errorf("unexpected total want:%d, got:%d", tc.wantTotal, gotTotal)
+			}
+		})
+	}
+}
+
+func TestValidateFailedIndexesNotOverlapCompleted(t *testing.T) {
+	testCases := map[string]struct {
+		completedIndexesStr string
+		failedIndexesStr    string
+		completions         int32
+		wantError           error
+	}{
+		"empty intervals": {
+			completedIndexesStr: "",
+			failedIndexesStr:    "",
+			completions:         6,
+		},
+		"empty completed intervals": {
+			completedIndexesStr: "",
+			failedIndexesStr:    "1-3",
+			completions:         6,
+		},
+		"empty failed intervals": {
+			completedIndexesStr: "1-2",
+			failedIndexesStr:    "",
+			completions:         6,
+		},
+		"non-overlapping intervals": {
+			completedIndexesStr: "0,2-4,6-8,12-19",
+			failedIndexesStr:    "1,9-10",
+			completions:         20,
+		},
+		"overlapping intervals": {
+			completedIndexesStr: "0,2-4,6-8,12-19",
+			failedIndexesStr:    "1,8,9-10",
+			completions:         20,
+			wantError:           errors.New("failedIndexes and completedIndexes overlap at index: 8"),
+		},
+		"overlapping intervals, corrupted completed interval skipped": {
+			completedIndexesStr: "0,2-4,x,6-8,12-19",
+			failedIndexesStr:    "1,8,9-10",
+			completions:         20,
+			wantError:           errors.New("failedIndexes and completedIndexes overlap at index: 8"),
+		},
+		"overlapping intervals, corrupted failed interval skipped": {
+			completedIndexesStr: "0,2-4,6-8,12-19",
+			failedIndexesStr:    "1,y,8,9-10",
+			completions:         20,
+			wantError:           errors.New("failedIndexes and completedIndexes overlap at index: 8"),
+		},
+		"overlapping intervals, first corrupted intervals skipped": {
+			completedIndexesStr: "x,0,2-4,6-8,12-19",
+			failedIndexesStr:    "y,1,8,9-10",
+			completions:         20,
+			wantError:           errors.New("failedIndexes and completedIndexes overlap at index: 8"),
+		},
+		"non-overlapping intervals, last intervals corrupted": {
+			completedIndexesStr: "0,2-4,6-8,12-19,x",
+			failedIndexesStr:    "1,9-10,y",
+			completions:         20,
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			gotErr := validateFailedIndexesNotOverlapCompleted(tc.completedIndexesStr, tc.failedIndexesStr, tc.completions)
+			if tc.wantError == nil && gotErr != nil {
+				t.Errorf("unexpected error: %s", gotErr)
+			} else if tc.wantError != nil && gotErr == nil {
+				t.Errorf("missing error: %s", tc.wantError)
+			} else if tc.wantError != nil && gotErr != nil {
+				if diff := cmp.Diff(tc.wantError.Error(), gotErr.Error()); diff != "" {
+					t.Errorf("unexpected error, diff: %s", diff)
+				}
+			}
+		})
 	}
 }

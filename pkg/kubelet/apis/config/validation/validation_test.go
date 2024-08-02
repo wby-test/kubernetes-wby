@@ -38,6 +38,7 @@ var (
 		EnforceNodeAllocatable:          enforceNodeAllocatable,
 		SystemReservedCgroup:            "/system.slice",
 		KubeReservedCgroup:              "/kubelet.service",
+		PodLogsDir:                      "/logs",
 		SystemCgroups:                   "",
 		CgroupRoot:                      "",
 		EventBurst:                      10,
@@ -104,10 +105,10 @@ func TestValidateKubeletConfiguration(t *testing.T) {
 		name: "specify EnforceNodeAllocatable without enabling CgroupsPerQOS",
 		configure: func(conf *kubeletconfig.KubeletConfiguration) *kubeletconfig.KubeletConfiguration {
 			conf.CgroupsPerQOS = false
-			conf.EnforceNodeAllocatable = []string{"pods"}
+			conf.EnforceNodeAllocatable = []string{kubetypes.NodeAllocatableEnforcementKey}
 			return conf
 		},
-		errMsg: "invalid configuration: enforceNodeAllocatable (--enforce-node-allocatable) is not supported unless cgroupsPerQOS (--cgroups-per-qos) is set to true",
+		errMsg: "invalid configuration: cgroupsPerQOS (--cgroups-per-qos) must be set to true when \"pods\" contained in enforceNodeAllocatable (--enforce-node-allocatable)",
 	}, {
 		name: "specify SystemCgroups without CgroupRoot",
 		configure: func(conf *kubeletconfig.KubeletConfiguration) *kubeletconfig.KubeletConfiguration {
@@ -366,7 +367,7 @@ func TestValidateKubeletConfiguration(t *testing.T) {
 			conf.MemorySwap.SwapBehavior = "invalid-behavior"
 			return conf
 		},
-		errMsg: "invalid configuration: memorySwap.swapBehavior \"invalid-behavior\" must be one of: \"\", \"LimitedSwap\", or \"UnlimitedSwap\"",
+		errMsg: "invalid configuration: memorySwap.swapBehavior \"invalid-behavior\" must be one of: \"\", \"LimitedSwap\" or \"NoSwap\"",
 	}, {
 		name: "specify MemorySwap.SwapBehavior without enabling NodeSwap",
 		configure: func(conf *kubeletconfig.KubeletConfiguration) *kubeletconfig.KubeletConfiguration {
@@ -398,6 +399,13 @@ func TestValidateKubeletConfiguration(t *testing.T) {
 			return conf
 		},
 		errMsg: "invalid configuration: enforceNodeAllocatable (--enforce-node-allocatable) may not contain additional enforcements when \"none\" is specified",
+	}, {
+		name: "duplicated EnforceNodeAllocatable",
+		configure: func(conf *kubeletconfig.KubeletConfiguration) *kubeletconfig.KubeletConfiguration {
+			conf.EnforceNodeAllocatable = []string{kubetypes.NodeAllocatableNoneKey, kubetypes.NodeAllocatableNoneKey}
+			return conf
+		},
+		errMsg: "invalid configuration: duplicated enforcements \"none\" in enforceNodeAllocatable (--enforce-node-allocatable)",
 	}, {
 		name: "invalid EnforceNodeAllocatable",
 		configure: func(conf *kubeletconfig.KubeletConfiguration) *kubeletconfig.KubeletConfiguration {
@@ -569,7 +577,36 @@ func TestValidateKubeletConfiguration(t *testing.T) {
 			return conf
 		},
 		errMsg: "invalid configuration: containerLogMonitorInterval must be a positive time duration greater than or equal to 3s",
-	}}
+	}, {
+		name: "pod logs path must be not empty",
+		configure: func(config *kubeletconfig.KubeletConfiguration) *kubeletconfig.KubeletConfiguration {
+			config.PodLogsDir = ""
+			return config
+		},
+		errMsg: "invalid configuration: podLogsDir was not specified",
+	}, {
+		name: "pod logs path must be absolute",
+		configure: func(config *kubeletconfig.KubeletConfiguration) *kubeletconfig.KubeletConfiguration {
+			config.PodLogsDir = "./test"
+			return config
+		},
+		errMsg: `invalid configuration: pod logs path "./test" must be absolute path`,
+	}, {
+		name: "pod logs path must be normalized",
+		configure: func(config *kubeletconfig.KubeletConfiguration) *kubeletconfig.KubeletConfiguration {
+			config.PodLogsDir = "/path/../"
+			return config
+		},
+		errMsg: `invalid configuration: pod logs path "/path/../" must be normalized`,
+	}, {
+		name: "pod logs path is ascii only",
+		configure: func(config *kubeletconfig.KubeletConfiguration) *kubeletconfig.KubeletConfiguration {
+			config.PodLogsDir = "/🧪"
+			return config
+		},
+		errMsg: `invalid configuration: pod logs path "/🧪" mut contains ASCII characters only`,
+	},
+	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

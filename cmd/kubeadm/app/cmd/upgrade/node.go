@@ -28,6 +28,7 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
+	"k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 	"k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/validation"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
 	phases "k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases/upgrade/node"
@@ -96,6 +97,7 @@ func newCmdNode(out io.Writer) *cobra.Command {
 	// initialize the workflow runner with the list of phases
 	nodeRunner.AppendPhase(phases.NewPreflightPhase())
 	nodeRunner.AppendPhase(phases.NewControlPlane())
+	nodeRunner.AppendPhase(phases.NewKubeconfigPhase())
 	nodeRunner.AppendPhase(phases.NewKubeletConfigPhase())
 
 	// sets the data builder function, that will be used by the runner
@@ -155,7 +157,9 @@ func newNodeData(cmd *cobra.Command, args []string, nodeOptions *nodeOptions, ou
 		}
 	}
 
-	upgradeCfg, err := configutil.LoadUpgradeConfig(nodeOptions.cfgPath)
+	externalCfg := &v1beta4.UpgradeConfiguration{}
+	opt := configutil.LoadOrDefaultConfigurationOptions{}
+	upgradeCfg, err := configutil.LoadOrDefaultUpgradeConfiguration(nodeOptions.cfgPath, externalCfg, opt)
 	if err != nil {
 		return nil, err
 	}
@@ -177,11 +181,11 @@ func newNodeData(cmd *cobra.Command, args []string, nodeOptions *nodeOptions, ou
 		return nil, errors.Wrap(err, "unable to fetch the kubeadm-config ConfigMap")
 	}
 
-	ignorePreflightErrorsSet, err := validation.ValidateIgnorePreflightErrors(nodeOptions.ignorePreflightErrors, initCfg.NodeRegistration.IgnorePreflightErrors)
+	ignorePreflightErrorsSet, err := validation.ValidateIgnorePreflightErrors(nodeOptions.ignorePreflightErrors, upgradeCfg.Node.IgnorePreflightErrors)
 	if err != nil {
 		return nil, err
 	}
-	// Also set the union of pre-flight errors to JoinConfiguration, to provide a consistent view of the runtime configuration:
+	// Also set the union of pre-flight errors to InitConfiguration, to provide a consistent view of the runtime configuration:
 	initCfg.NodeRegistration.IgnorePreflightErrors = sets.List(ignorePreflightErrorsSet)
 
 	var patchesDir string

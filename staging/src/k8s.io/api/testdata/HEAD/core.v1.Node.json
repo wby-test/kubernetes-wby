@@ -156,6 +156,18 @@
         }
       },
       "error": "errorValue"
+    },
+    "runtimeHandlers": [
+      {
+        "name": "nameValue",
+        "features": {
+          "recursiveReadOnlyMounts": true,
+          "userNamespaces": true
+        }
+      }
+    ],
+    "features": {
+      "supplementalGroupsPolicy": true
     }
   }
 }

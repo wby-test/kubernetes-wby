@@ -40,8 +40,10 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"k8s.io/kubernetes/pkg/apis/scheduling"
 	"k8s.io/kubernetes/pkg/features"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
+	"k8s.io/utils/ptr"
 )
 
 func makeExpectedConfig(m *kubeGenericRuntimeManager, pod *v1.Pod, containerIndex int, enforceMemoryQoS bool) *runtimeapi.ContainerConfig {
@@ -49,7 +51,7 @@ func makeExpectedConfig(m *kubeGenericRuntimeManager, pod *v1.Pod, containerInde
 	container := &pod.Spec.Containers[containerIndex]
 	podIP := ""
 	restartCount := 0
-	opts, _, _ := m.runtimeHelper.GenerateRunContainerOptions(ctx, pod, container, podIP, []string{podIP})
+	opts, _, _ := m.runtimeHelper.GenerateRunContainerOptions(ctx, pod, container, podIP, []string{podIP}, nil)
 	containerLogsPath := buildContainerLogsPath(container.Name, restartCount)
 	restartCountUint32 := uint32(restartCount)
 	envs := make([]*runtimeapi.KeyValue, len(opts.Envs))
@@ -111,7 +113,7 @@ func TestGenerateContainerConfig(t *testing.T) {
 	}
 
 	expectedConfig := makeExpectedConfig(m, pod, 0, false)
-	containerConfig, _, err := m.generateContainerConfig(ctx, &pod.Spec.Containers[0], pod, 0, "", pod.Spec.Containers[0].Image, []string{}, nil)
+	containerConfig, _, err := m.generateContainerConfig(ctx, &pod.Spec.Containers[0], pod, 0, "", pod.Spec.Containers[0].Image, []string{}, nil, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, expectedConfig, containerConfig, "generate container config for kubelet runtime v1.")
 	assert.Equal(t, runAsUser, containerConfig.GetLinux().GetSecurityContext().GetRunAsUser().GetValue(), "RunAsUser should be set")
@@ -142,7 +144,7 @@ func TestGenerateContainerConfig(t *testing.T) {
 		},
 	}
 
-	_, _, err = m.generateContainerConfig(ctx, &podWithContainerSecurityContext.Spec.Containers[0], podWithContainerSecurityContext, 0, "", podWithContainerSecurityContext.Spec.Containers[0].Image, []string{}, nil)
+	_, _, err = m.generateContainerConfig(ctx, &podWithContainerSecurityContext.Spec.Containers[0], podWithContainerSecurityContext, 0, "", podWithContainerSecurityContext.Spec.Containers[0].Image, []string{}, nil, nil)
 	assert.Error(t, err)
 
 	imageID, _ := imageService.PullImage(ctx, &runtimeapi.ImageSpec{Image: "busybox"}, nil, nil)
@@ -154,7 +156,7 @@ func TestGenerateContainerConfig(t *testing.T) {
 	podWithContainerSecurityContext.Spec.Containers[0].SecurityContext.RunAsUser = nil
 	podWithContainerSecurityContext.Spec.Containers[0].SecurityContext.RunAsNonRoot = &runAsNonRootTrue
 
-	_, _, err = m.generateContainerConfig(ctx, &podWithContainerSecurityContext.Spec.Containers[0], podWithContainerSecurityContext, 0, "", podWithContainerSecurityContext.Spec.Containers[0].Image, []string{}, nil)
+	_, _, err = m.generateContainerConfig(ctx, &podWithContainerSecurityContext.Spec.Containers[0], podWithContainerSecurityContext, 0, "", podWithContainerSecurityContext.Spec.Containers[0].Image, []string{}, nil, nil)
 	assert.Error(t, err, "RunAsNonRoot should fail for non-numeric username")
 }
 
@@ -698,6 +700,92 @@ func TestGenerateLinuxContainerConfigNamespaces(t *testing.T) {
 	}
 }
 
+var (
+	supplementalGroupsPolicyUnSupported = v1.SupplementalGroupsPolicy("UnSupported")
+	supplementalGroupsPolicyMerge       = v1.SupplementalGroupsPolicyMerge
+	supplementalGroupsPolicyStrict      = v1.SupplementalGroupsPolicyStrict
+)
+
+func TestGenerateLinuxConfigSupplementalGroupsPolicy(t *testing.T) {
+	_, _, m, err := createTestRuntimeManager()
+	if err != nil {
+		t.Fatalf("error creating test RuntimeManager: %v", err)
+	}
+
+	containerName := "test"
+	for _, tc := range []struct {
+		name           string
+		pod            *v1.Pod
+		expected       runtimeapi.SupplementalGroupsPolicy
+		expectErr      bool
+		expectedErrMsg string
+	}{{
+		name: "Merge SupplementalGroupsPolicy should convert to Merge",
+		pod: &v1.Pod{
+			Spec: v1.PodSpec{
+				SecurityContext: &v1.PodSecurityContext{
+					SupplementalGroupsPolicy: &supplementalGroupsPolicyMerge,
+				},
+				Containers: []v1.Container{
+					{Name: containerName},
+				},
+			},
+		},
+		expected: runtimeapi.SupplementalGroupsPolicy_Merge,
+	}, {
+		name: "Strict SupplementalGroupsPolicy should convert to Strict",
+		pod: &v1.Pod{
+			Spec: v1.PodSpec{
+				SecurityContext: &v1.PodSecurityContext{
+					SupplementalGroupsPolicy: &supplementalGroupsPolicyStrict,
+				},
+				Containers: []v1.Container{
+					{Name: containerName},
+				},
+			},
+		},
+		expected: runtimeapi.SupplementalGroupsPolicy_Strict,
+	}, {
+		name: "nil SupplementalGroupsPolicy should convert to Merge",
+		pod: &v1.Pod{
+			Spec: v1.PodSpec{
+				SecurityContext: &v1.PodSecurityContext{},
+				Containers: []v1.Container{
+					{Name: containerName},
+				},
+			},
+		},
+		expected: runtimeapi.SupplementalGroupsPolicy_Merge,
+	}, {
+		name: "unsupported SupplementalGroupsPolicy should raise an error",
+		pod: &v1.Pod{
+			Spec: v1.PodSpec{
+				SecurityContext: &v1.PodSecurityContext{
+					SupplementalGroupsPolicy: &supplementalGroupsPolicyUnSupported,
+				},
+				Containers: []v1.Container{
+					{Name: containerName},
+				},
+			},
+		},
+		expectErr:      true,
+		expectedErrMsg: "unsupported supplementalGroupsPolicy: UnSupported",
+	},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			actual, err := m.generateLinuxContainerConfig(&tc.pod.Spec.Containers[0], tc.pod, nil, "", nil, false)
+			if !tc.expectErr {
+				assert.Emptyf(t, err, "Unexpected error")
+				assert.EqualValuesf(t, tc.expected, actual.SecurityContext.SupplementalGroupsPolicy, "SupplementalGroupPolicy for %s", tc.name)
+			} else {
+				assert.NotEmpty(t, err, "Unexpected success")
+				assert.Empty(t, actual, "Unexpected non empty value")
+				assert.Contains(t, err.Error(), tc.expectedErrMsg, "Error for %s", tc.name)
+			}
+		})
+	}
+}
+
 func TestGenerateLinuxContainerResources(t *testing.T) {
 	_, _, m, err := createTestRuntimeManager()
 	assert.NoError(t, err)
@@ -848,7 +936,7 @@ func TestGenerateLinuxContainerResources(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			defer setSwapControllerAvailableDuringTest(false)()
 			if tc.scalingFg {
-				defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.InPlacePodVerticalScaling, true)()
+				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.InPlacePodVerticalScaling, true)
 			}
 
 			setCgroupVersionDuringTest(cgroupV1)
@@ -918,19 +1006,6 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 		}
 	}
 
-	expectUnlimitedSwap := func(cgroupVersion CgroupVersion, resources ...*runtimeapi.LinuxContainerResources) {
-		const msg = "container is expected to have unlimited swap access"
-
-		for _, r := range resources {
-			switch cgroupVersion {
-			case cgroupV1:
-				assert.Equal(t, int64(-1), r.MemorySwapLimitInBytes, msg)
-			case cgroupV2:
-				assert.Equal(t, "max", r.Unified[cm.Cgroup2MaxSwapFilename], msg)
-			}
-		}
-	}
-
 	expectSwap := func(cgroupVersion CgroupVersion, swapBytesExpected int64, resources *runtimeapi.LinuxContainerResources) {
 		msg := fmt.Sprintf("container swap is expected to be limited by %d bytes", swapBytesExpected)
 
@@ -958,6 +1033,7 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 		swapBehavior                string
 		addContainerWithoutRequests bool
 		addGuaranteedContainer      bool
+		isCriticalPod               bool
 	}{
 		// With cgroup v1
 		{
@@ -966,13 +1042,6 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 			qosClass:                   v1.PodQOSBurstable,
 			nodeSwapFeatureGateEnabled: true,
 			swapBehavior:               types.LimitedSwap,
-		},
-		{
-			name:                       "cgroups v1, UnlimitedSwap, Burstable QoS",
-			cgroupVersion:              cgroupV1,
-			qosClass:                   v1.PodQOSBurstable,
-			nodeSwapFeatureGateEnabled: true,
-			swapBehavior:               types.UnlimitedSwap,
 		},
 		{
 			name:                       "cgroups v1, LimitedSwap, Best-effort QoS",
@@ -990,17 +1059,10 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 			nodeSwapFeatureGateEnabled: false,
 			swapBehavior:               types.LimitedSwap,
 		},
-		{
-			name:                       "NodeSwap feature gate turned off, cgroups v2, UnlimitedSwap",
-			cgroupVersion:              cgroupV2,
-			qosClass:                   v1.PodQOSBurstable,
-			nodeSwapFeatureGateEnabled: false,
-			swapBehavior:               types.UnlimitedSwap,
-		},
 
-		// With no swapBehavior, UnlimitedSwap should be the default
+		// With no swapBehavior, NoSwap should be the default
 		{
-			name:                       "With no swapBehavior - UnlimitedSwap should be the default",
+			name:                       "With no swapBehavior - NoSwap should be the default",
 			cgroupVersion:              cgroupV2,
 			qosClass:                   v1.PodQOSBestEffort,
 			nodeSwapFeatureGateEnabled: true,
@@ -1009,6 +1071,13 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 
 		// With Guaranteed and Best-effort QoS
 		{
+			name:                       "Best-effort QoS, cgroups v2, NoSwap",
+			cgroupVersion:              cgroupV2,
+			qosClass:                   v1.PodQOSBestEffort,
+			nodeSwapFeatureGateEnabled: true,
+			swapBehavior:               "NoSwap",
+		},
+		{
 			name:                       "Best-effort QoS, cgroups v2, LimitedSwap",
 			cgroupVersion:              cgroupV2,
 			qosClass:                   v1.PodQOSBurstable,
@@ -1016,25 +1085,11 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 			swapBehavior:               types.LimitedSwap,
 		},
 		{
-			name:                       "Best-effort QoS, cgroups v2, UnlimitedSwap",
-			cgroupVersion:              cgroupV2,
-			qosClass:                   v1.PodQOSBurstable,
-			nodeSwapFeatureGateEnabled: true,
-			swapBehavior:               types.UnlimitedSwap,
-		},
-		{
 			name:                       "Guaranteed QoS, cgroups v2, LimitedSwap",
 			cgroupVersion:              cgroupV2,
 			qosClass:                   v1.PodQOSGuaranteed,
 			nodeSwapFeatureGateEnabled: true,
 			swapBehavior:               types.LimitedSwap,
-		},
-		{
-			name:                       "Guaranteed QoS, cgroups v2, UnlimitedSwap",
-			cgroupVersion:              cgroupV2,
-			qosClass:                   v1.PodQOSGuaranteed,
-			nodeSwapFeatureGateEnabled: true,
-			swapBehavior:               types.UnlimitedSwap,
 		},
 
 		// With a "guaranteed" container (when memory requests equal to limits)
@@ -1044,15 +1099,6 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 			qosClass:                    v1.PodQOSBurstable,
 			nodeSwapFeatureGateEnabled:  true,
 			swapBehavior:                types.LimitedSwap,
-			addContainerWithoutRequests: false,
-			addGuaranteedContainer:      true,
-		},
-		{
-			name:                        "Burstable QoS, cgroups v2, UnlimitedSwap, with a guaranteed container",
-			cgroupVersion:               cgroupV2,
-			qosClass:                    v1.PodQOSBurstable,
-			nodeSwapFeatureGateEnabled:  true,
-			swapBehavior:                types.UnlimitedSwap,
 			addContainerWithoutRequests: false,
 			addGuaranteedContainer:      true,
 		},
@@ -1068,29 +1114,11 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 			addGuaranteedContainer:      false,
 		},
 		{
-			name:                        "Burstable QoS, cgroups v2, UnlimitedSwap",
-			cgroupVersion:               cgroupV2,
-			qosClass:                    v1.PodQOSBurstable,
-			nodeSwapFeatureGateEnabled:  true,
-			swapBehavior:                types.UnlimitedSwap,
-			addContainerWithoutRequests: false,
-			addGuaranteedContainer:      false,
-		},
-		{
 			name:                        "Burstable QoS, cgroups v2, LimitedSwap, with a container with no requests",
 			cgroupVersion:               cgroupV2,
 			qosClass:                    v1.PodQOSBurstable,
 			nodeSwapFeatureGateEnabled:  true,
 			swapBehavior:                types.LimitedSwap,
-			addContainerWithoutRequests: true,
-			addGuaranteedContainer:      false,
-		},
-		{
-			name:                        "Burstable QoS, cgroups v2, UnlimitedSwap, with a container with no requests",
-			cgroupVersion:               cgroupV2,
-			qosClass:                    v1.PodQOSBurstable,
-			nodeSwapFeatureGateEnabled:  true,
-			swapBehavior:                types.UnlimitedSwap,
 			addContainerWithoutRequests: true,
 			addGuaranteedContainer:      false,
 		},
@@ -1102,14 +1130,6 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 			qosClass:                   v1.PodQOSBurstable,
 			nodeSwapFeatureGateEnabled: true,
 			swapBehavior:               types.LimitedSwap,
-		},
-		{
-			name:                       "Swap disabled on node, cgroups v1, UnlimitedSwap, Burstable QoS",
-			swapDisabledOnNode:         true,
-			cgroupVersion:              cgroupV1,
-			qosClass:                   v1.PodQOSBurstable,
-			nodeSwapFeatureGateEnabled: true,
-			swapBehavior:               types.UnlimitedSwap,
 		},
 		{
 			name:                       "Swap disabled on node, cgroups v1, LimitedSwap, Best-effort QoS",
@@ -1129,18 +1149,10 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 			nodeSwapFeatureGateEnabled: false,
 			swapBehavior:               types.LimitedSwap,
 		},
-		{
-			name:                       "Swap disabled on node, NodeSwap feature gate turned off, cgroups v2, UnlimitedSwap",
-			swapDisabledOnNode:         true,
-			cgroupVersion:              cgroupV2,
-			qosClass:                   v1.PodQOSBurstable,
-			nodeSwapFeatureGateEnabled: false,
-			swapBehavior:               types.UnlimitedSwap,
-		},
 
-		// With no swapBehavior, UnlimitedSwap should be the default
+		// With no swapBehavior, NoSwap should be the default
 		{
-			name:                       "Swap disabled on node, With no swapBehavior - UnlimitedSwap should be the default",
+			name:                       "Swap disabled on node, With no swapBehavior - NoSwap should be the default",
 			swapDisabledOnNode:         true,
 			cgroupVersion:              cgroupV2,
 			qosClass:                   v1.PodQOSBestEffort,
@@ -1158,28 +1170,12 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 			swapBehavior:               types.LimitedSwap,
 		},
 		{
-			name:                       "Swap disabled on node, Best-effort QoS, cgroups v2, UnlimitedSwap",
-			swapDisabledOnNode:         true,
-			cgroupVersion:              cgroupV2,
-			qosClass:                   v1.PodQOSBurstable,
-			nodeSwapFeatureGateEnabled: true,
-			swapBehavior:               types.UnlimitedSwap,
-		},
-		{
 			name:                       "Swap disabled on node, Guaranteed QoS, cgroups v2, LimitedSwap",
 			swapDisabledOnNode:         true,
 			cgroupVersion:              cgroupV2,
 			qosClass:                   v1.PodQOSGuaranteed,
 			nodeSwapFeatureGateEnabled: true,
 			swapBehavior:               types.LimitedSwap,
-		},
-		{
-			name:                       "Swap disabled on node, Guaranteed QoS, cgroups v2, UnlimitedSwap",
-			swapDisabledOnNode:         true,
-			cgroupVersion:              cgroupV2,
-			qosClass:                   v1.PodQOSGuaranteed,
-			nodeSwapFeatureGateEnabled: true,
-			swapBehavior:               types.UnlimitedSwap,
 		},
 
 		// With a "guaranteed" container (when memory requests equal to limits)
@@ -1190,16 +1186,6 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 			qosClass:                    v1.PodQOSBurstable,
 			nodeSwapFeatureGateEnabled:  true,
 			swapBehavior:                types.LimitedSwap,
-			addContainerWithoutRequests: false,
-			addGuaranteedContainer:      true,
-		},
-		{
-			name:                        "Swap disabled on node, Burstable QoS, cgroups v2, UnlimitedSwap, with a guaranteed container",
-			swapDisabledOnNode:          true,
-			cgroupVersion:               cgroupV2,
-			qosClass:                    v1.PodQOSBurstable,
-			nodeSwapFeatureGateEnabled:  true,
-			swapBehavior:                types.UnlimitedSwap,
 			addContainerWithoutRequests: false,
 			addGuaranteedContainer:      true,
 		},
@@ -1216,16 +1202,6 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 			addGuaranteedContainer:      false,
 		},
 		{
-			name:                        "Swap disabled on node, Burstable QoS, cgroups v2, UnlimitedSwap",
-			swapDisabledOnNode:          true,
-			cgroupVersion:               cgroupV2,
-			qosClass:                    v1.PodQOSBurstable,
-			nodeSwapFeatureGateEnabled:  true,
-			swapBehavior:                types.UnlimitedSwap,
-			addContainerWithoutRequests: false,
-			addGuaranteedContainer:      false,
-		},
-		{
 			name:                        "Swap disabled on node, Burstable QoS, cgroups v2, LimitedSwap, with a container with no requests",
 			swapDisabledOnNode:          true,
 			cgroupVersion:               cgroupV2,
@@ -1235,21 +1211,21 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 			addContainerWithoutRequests: true,
 			addGuaranteedContainer:      false,
 		},
+
+		// When the pod is considered critical, disallow swap access
 		{
-			name:                        "Swap disabled on node, Burstable QoS, cgroups v2, UnlimitedSwap, with a container with no requests",
-			swapDisabledOnNode:          true,
-			cgroupVersion:               cgroupV2,
-			qosClass:                    v1.PodQOSBurstable,
-			nodeSwapFeatureGateEnabled:  true,
-			swapBehavior:                types.UnlimitedSwap,
-			addContainerWithoutRequests: true,
-			addGuaranteedContainer:      false,
+			name:                       "Best-effort QoS, cgroups v2, LimitedSwap, critical pod",
+			cgroupVersion:              cgroupV2,
+			qosClass:                   v1.PodQOSBurstable,
+			nodeSwapFeatureGateEnabled: true,
+			swapBehavior:               types.LimitedSwap,
+			isCriticalPod:              true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setCgroupVersionDuringTest(tc.cgroupVersion)
 			defer setSwapControllerAvailableDuringTest(!tc.swapDisabledOnNode)()
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeSwap, tc.nodeSwapFeatureGateEnabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeSwap, tc.nodeSwapFeatureGateEnabled)
 			m.memorySwapBehavior = tc.swapBehavior
 
 			var resourceReqsC1, resourceReqsC2 v1.ResourceRequirements
@@ -1281,6 +1257,11 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 			pod.Spec.Containers[0].Resources = resourceReqsC1
 			pod.Spec.Containers[1].Resources = resourceReqsC2
 
+			if tc.isCriticalPod {
+				pod.Spec.Priority = ptr.To(scheduling.SystemCriticalPriority)
+				assert.True(t, types.IsCriticalPod(pod), "pod is expected to be critical")
+			}
+
 			resourcesC1 := m.generateLinuxContainerResources(pod, &pod.Spec.Containers[0], false)
 			resourcesC2 := m.generateLinuxContainerResources(pod, &pod.Spec.Containers[1], false)
 
@@ -1289,13 +1270,13 @@ func TestGenerateLinuxContainerResourcesWithSwap(t *testing.T) {
 				return
 			}
 
-			if !tc.nodeSwapFeatureGateEnabled || tc.cgroupVersion == cgroupV1 || (tc.swapBehavior == types.LimitedSwap && tc.qosClass != v1.PodQOSBurstable) {
+			if tc.isCriticalPod || !tc.nodeSwapFeatureGateEnabled || tc.cgroupVersion == cgroupV1 || (tc.swapBehavior == types.LimitedSwap && tc.qosClass != v1.PodQOSBurstable) {
 				expectNoSwap(tc.cgroupVersion, resourcesC1, resourcesC2)
 				return
 			}
 
-			if tc.swapBehavior == types.UnlimitedSwap || tc.swapBehavior == "" {
-				expectUnlimitedSwap(tc.cgroupVersion, resourcesC1, resourcesC2)
+			if tc.swapBehavior == types.NoSwap || tc.swapBehavior == "" {
+				expectNoSwap(tc.cgroupVersion, resourcesC1, resourcesC2)
 				return
 			}
 
